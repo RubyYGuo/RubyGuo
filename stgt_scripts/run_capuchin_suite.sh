@@ -21,8 +21,8 @@
 # Load conda
 source "$HOME/miniconda3/etc/profile.d/conda.sh"
 
-# Activate environment
+# Activate environment 
 conda activate capuchinyolov5
 
 # Run integrated YOLO + STGT controller
-python /home/capuchin/yolo5model/yolov5/stgt_scripts/stgt_master_script.py --csi 0 1
+python3 -i /home/capuchin/yolo5model/yolov5/stgt_scripts/stgt_master_script.py --csi 0 1
