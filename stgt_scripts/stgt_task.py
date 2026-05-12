@@ -32,7 +32,7 @@ parser.add_argument("--itt_jitter", type=float, default=2)
 args = parser.parse_args()
 
 execution_id = args.execution_id or datetime.now().strftime("%Y%m%d_%H%M%S")
-session_number = args.session_number
+session_number = int(args.session_number)
 max_trial = args.max_trial
 lever_dur = args.lever_dur
 itt_base = args.itt_base
@@ -41,7 +41,7 @@ itt_jitter = args.itt_jitter
 # =========================
 # STGT DATA DIRECTORY
 # =========================
-stgt_data_dir = Path("/home/capuchin/SSD/stgt_data/task_data")
+stgt_data_dir = Path("/home/capuchin/stgt_data/task_data")
 stgt_data_dir.mkdir(parents=True, exist_ok=True)  # ensure folder exists
 
 
@@ -57,8 +57,10 @@ print(f"[INFO] STGT CSV file will be saved to: {csv_path.resolve()}")
 # =========================
 relay_lv_out = 19
 lv_press_pin = 13
+relay_cue_light = 12
 relay_mgz = 22
-mgz_beam_pin = 17
+mgz_beam_pin = 21
+
 
 # =========================
 # GPIO SETUP
@@ -67,6 +69,7 @@ GPIO.setmode(GPIO.BCM)
 
 try:
     GPIO.setup(relay_lv_out, GPIO.OUT)
+    GPIO.setup(relay_cue_light, GPIO.OUT)
     GPIO.setup(relay_mgz, GPIO.OUT)
     GPIO.setup(lv_press_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
     GPIO.setup(mgz_beam_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
@@ -109,7 +112,6 @@ if not csv_exists:
     # ---- Write Schedule Metadata ----
     csv_writer.writerow(["# SCHEDULE"])
     csv_writer.writerow(["execution_id", execution_id])
-    csv_writer.writerow(["session", session_number])
     csv_writer.writerow(["max_trial", max_trial])
     csv_writer.writerow(["lever_dur", lever_dur])
     csv_writer.writerow(["itt_base", itt_base])
@@ -141,6 +143,7 @@ try:
         # ----- LEVER PHASE -----
         phase = "lever"
         GPIO.output(relay_lv_out, False)
+        GPIO.output(relay_cue_light, False)
         start_time = time.time()
 
         # Edge detection: track previous lever state; holding = 1 press
@@ -156,6 +159,7 @@ try:
             time.sleep(0.05) 
 
         GPIO.output(relay_lv_out, True)
+        GPIO.output(relay_cue_light, True)
 
         # ----- REWARD -----
         GPIO.output(relay_mgz, False)
@@ -204,3 +208,4 @@ finally:
     GPIO.cleanup()  # only cleanup once at the very end
     csv_file.close()
     print("[INFO] GPIO cleaned up, CSV saved")
+
