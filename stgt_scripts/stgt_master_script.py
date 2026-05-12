@@ -25,13 +25,14 @@ from collections import deque
 import subprocess
 import re
 import signal
+from ultralytics import YOLO
 
 # =========================
 # Logging setup
 # =========================
 execution_id = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-stgt_data_dir = Path("/home/capuchin/SSD/stgt_data/task_data")
+stgt_data_dir = Path("/home/capuchin/stgt_data/task_data")
 stgt_data_dir.mkdir(parents=True, exist_ok=True)
 
 log_file_path = stgt_data_dir / f"session_log_{execution_id}.txt"
@@ -46,6 +47,18 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
+
+# =========================
+# Hardware Diagnostics
+# =========================
+def get_cpu_temp():
+    try:
+        with open("/sys/class/thermal/thermal_zone0/temp", "r") as f:
+            temp = int(f.read().strip()) / 1000.0
+        return round(temp, 1)
+    except Exception as e:
+        logger.error(f"Failed to read CPU temperature: {e}")
+        return "N/A"
 
 # =========================
 # FPS Helper
@@ -78,18 +91,27 @@ def configure_schedule():
 def get_next_session_number(csv_path):
     if not csv_path.exists():
         return 1
+    
+    max_session = 0
     try:
         with open(csv_path, "r") as f:
-            lines = f.readlines()
-        if len(lines) <= 1:
-            return 1
-        for line in reversed(lines):
-            if line.strip() and not line.startswith("#"):
-                parts = line.strip().split(",")
-                return int(parts[1]) + 1
-    except:
-        pass
-    return 1
+            reader = csv.reader(f)
+            # Skip the header row
+            next(reader, None) 
+            
+            for row in reader:
+                # Ensure row has enough columns and isn't metadata
+                if len(row) >= 3:
+                    session_str = row[2].strip()
+                    if session_str.isdigit():
+                        current_val = int(session_str)
+                        if current_val > max_session:
+                            max_session = current_val
+                            
+        return max_session + 1
+    except Exception as e:
+        logger.error(f"Error reading session number: {e}")
+        return 1
 
 # =========================
 # Main run
@@ -110,16 +132,18 @@ def run(weights='best.pt', img_size=416, conf_thres=0.5, csi_sources=[]):
     recording = False
     out = None
     last_detection_time = 0
+    filename = ""
 
     stgt_process = None
     stgt_started = False
 
     session_count_in_burst = 0
-    last_session_time = 0
+    last_stgt_end_time = 0
     cooldown_until = 0
 
     last_blocked_log_time = 0
     BLOCK_LOG_INTERVAL = 2  # sec
+    session_number = ""     # Initialized to ensure continuous scope
 
     # CSI state
     csi_outs = [None] * len(csi_sources)
@@ -128,9 +152,7 @@ def run(weights='best.pt', img_size=416, conf_thres=0.5, csi_sources=[]):
 
     # Load YOLO
     logger.info("Loading YOLO model")
-    model = torch.hub.load('ultralytics/yolov5', 'custom', path=weights, force_reload=False)
-    model.conf = conf_thres
-    model.iou = 0.4
+    model = YOLO(weights)
 
     # Open USB camera
     device = "/dev/v4l/by-id/usb-046d_HD_Pro_Webcam_C920_99F8F02F-video-index0"
@@ -145,7 +167,7 @@ def run(weights='best.pt', img_size=416, conf_thres=0.5, csi_sources=[]):
     time_deque = deque(maxlen=30)
 
     # Recording directory and CSV
-    record_dir = Path("/home/capuchin/SSD/stgt_data/video_recordings")
+    record_dir = Path("/home/capuchin/stgt_data/video_recordings")
     record_dir.mkdir(exist_ok=True)
     log_csv_path = record_dir / f"sessions_{execution_id}.csv"
     csv_file = open(log_csv_path, "a", newline="")
@@ -168,8 +190,8 @@ def run(weights='best.pt', img_size=416, conf_thres=0.5, csi_sources=[]):
             # =========================
             # YOLO Detection
             # =========================
-            results = model(frame, size=img_size)
-            has_detection = len(results.xyxy[0]) > 0
+            results = model(frame, imgsz=img_size, conf=conf_thres, iou=0.4, verbose=False)
+            has_detection = len(results[0].boxes) > 0
 
             # =========================
             # USB Recording (independent)
@@ -199,6 +221,31 @@ def run(weights='best.pt', img_size=416, conf_thres=0.5, csi_sources=[]):
                     out.release()
                 recording = False
                 out = None
+                filename = ""
+
+            # =========================
+            # Detect STGT completion & stop CSI
+            # =========================
+            if stgt_started and stgt_process and stgt_process.poll() is not None:
+                logger.info("STGT finished, stopping CSI cameras")
+                for i, proc in enumerate(csi_outs):
+                    if proc:
+                        proc.send_signal(signal.SIGINT)
+                        proc.wait()
+                        csv_writer.writerow([
+                            datetime.now().isoformat(),
+                            execution_id,
+                            session_number, 
+                            "stopped",
+                            "",
+                            str(csi_filenames[i])
+                        ])
+                        csv_file.flush()
+                stgt_started = False
+                last_stgt_end_time = current_time
+                csi_outs = [None] * len(csi_sources)
+                csi_start_times = [None] * len(csi_sources)
+                csi_filenames = [None] * len(csi_sources)
 
             # =========================
             # Session state-trigger logic
@@ -206,22 +253,26 @@ def run(weights='best.pt', img_size=416, conf_thres=0.5, csi_sources=[]):
             session_allowed = True
             reason = ""
 
+            if current_time >= cooldown_until and cooldown_until > 0:
+                session_count_in_burst = 0
+                cooldown_until = 0
+
             if current_time < cooldown_until:
                 session_allowed = False
                 reason = "cooldown"
             elif session_count_in_burst >= max_sessions_in_burst:
                 session_allowed = False
                 reason = "burst_limit"
-            elif session_count_in_burst > 0 and (current_time - last_session_time > burst_interval):
+            elif not stgt_started and session_count_in_burst > 0 and (current_time - last_stgt_end_time > burst_interval):
                 session_count_in_burst = 0  # reset burst
 
-            if has_detection and session_allowed and (stgt_process is None or stgt_process.poll() is not None):
+            if has_detection and session_allowed and not stgt_started:
                 # Start new session
                 session_number = get_next_session_number(log_csv_path)
                 session_count_in_burst += 1
-                last_session_time = current_time
+                current_temp = get_cpu_temp()
 
-                logger.info(f"Starting STGT session {session_number}")
+                logger.info(f"Starting STGT session {session_number} | CPU Temp: {current_temp}°C")
 
                 csv_writer.writerow([
                     datetime.now().isoformat(),
@@ -229,14 +280,14 @@ def run(weights='best.pt', img_size=416, conf_thres=0.5, csi_sources=[]):
                     session_number,
                     "started",
                     "",
-                    ""
+                    filename if recording else ""
                 ])
                 csv_file.flush()
 
                 # Start STGT task
                 stgt_process = subprocess.Popen([
                     "/usr/bin/python3",
-                    "/home/capuchin/yolo5model/yolov5/stgt_scripts/stgt_task.py",
+                    "/home/capuchin/Desktop/stgt_scripts/stgt_task.py",
                     "--execution_id", execution_id,
                     "--session_number", str(session_number),
                     "--max_trial", str(max_trial),
@@ -274,7 +325,6 @@ def run(weights='best.pt', img_size=416, conf_thres=0.5, csi_sources=[]):
                 # Apply cooldown if burst maxed
                 if session_count_in_burst >= max_sessions_in_burst:
                     cooldown_until = current_time + cooldown_time
-                    session_count_in_burst = 0
                     logger.info(f"Cooldown applied for {cooldown_time} seconds")
 
             # Blocked session logging
@@ -283,37 +333,14 @@ def run(weights='best.pt', img_size=416, conf_thres=0.5, csi_sources=[]):
                     csv_writer.writerow([
                         datetime.now().isoformat(),
                         execution_id,
-                        "",
+                        session_number,
                         "blocked",
                         reason,
-                        ""
+                        filename if recording else ""
                     ])
                     csv_file.flush()
                     logger.info(f"Session blocked: {reason}")
                     last_blocked_log_time = current_time
-
-            # =========================
-            # Detect STGT completion & stop CSI
-            # =========================
-            if stgt_started and stgt_process and stgt_process.poll() is not None:
-                logger.info("STGT finished, stopping CSI cameras")
-                for i, proc in enumerate(csi_outs):
-                    if proc:
-                        proc.send_signal(signal.SIGINT)
-                        proc.wait()
-                        csv_writer.writerow([
-                            datetime.now().isoformat(),
-                            execution_id,
-                            "",
-                            "stopped",
-                            "",
-                            str(csi_filenames[i])
-                        ])
-                        csv_file.flush()
-                stgt_started = False
-                csi_outs = [None] * len(csi_sources)
-                csi_start_times = [None] * len(csi_sources)
-                csi_filenames = [None] * len(csi_sources)
 
             time.sleep(0.005)
 
@@ -352,3 +379,4 @@ if __name__ == "__main__":
         conf_thres=args.conf,
         csi_sources=args.csi
     )
+
