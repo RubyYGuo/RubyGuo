@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+
+import cv2
+import argparse
+import time
+import logging
+from collections import deque
+from ultralytics import YOLO
+
+# =========================
+# Logging setup
+# =========================
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
+logger = logging.getLogger(__name__)
+
+# =========================
+# Main Test Function
+# =========================
+def run_test(weights='best.pt', img_size=416, conf_thres=0.75):
+    logger.info("Initializing YOLO Model for Testing Phase...")
+    try:
+        model = YOLO(weights)
+    except Exception as e:
+        logger.error(f"Failed to load YOLO model: {e}")
+        return
+
+    device = "/dev/video0"
+    logger.info(f"Opening USB camera: {device}")
+    cap = cv2.VideoCapture(device, cv2.CAP_V4L2)
+    
+    if not cap.isOpened():
+        logger.error("Failed to open USB camera. Please verify the hardware connection.")
+        return
+
+    # =========================
+    # State Variables
+    # =========================
+    detection_window = deque(maxlen=30)
+    is_present = False
+    last_verified_presence_time = 0
+    
+    # Mock trigger variables
+    last_mock_trigger_time = 0
+    mock_trigger_cooldown = 10.0  # Seconds to wait between mock triggers for visual clarity
+
+    logger.info("Starting live camera view. Press 'q' in the video window to exit.")
+
+    try:
+        while True:
+            current_time = time.time()
+            ret, frame = cap.read()
+            if not ret:
+                time.sleep(0.05)
+                continue
+
+            # =========================
+            # YOLO Detection
+            # =========================
+            results = model(frame, imgsz=img_size, conf=conf_thres, iou=0.4, verbose=False)
+            raw_detection = False
+
+            # Draw bounding boxes
+            if len(results[0].boxes) > 0:
+                raw_detection = True
+                for box in results[0].boxes:
+                    # Extract coordinates and confidence
+                    x1, y1, x2, y2 = map(int, box.xyxy[0])
+                    conf = float(box.conf[0])
+                    
+                    # Draw rectangle and label
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    label = f"Capuchin: {conf:.2f}"
+                    cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+
+            # =========================
+            # Rolling Window Logic
+            # =========================
+            detection_window.append(1 if raw_detection else 0)
+            detection_ratio = sum(detection_window) / len(detection_window) if len(detection_window) > 0 else 0
+
+            # Evaluate Hysteresis / Interaction Bout
+            if detection_ratio >= 0.50:
+                is_present = True
+                last_verified_presence_time = current_time
+            elif is_present and (current_time - last_verified_presence_time > 3.0):
+                is_present = False
+
+            # =========================
+            # Mock Trigger Logic
+            # =========================
+            # Trigger a visual alert if the subject is present and the mock cooldown has elapsed
+            if is_present and (current_time - last_mock_trigger_time > mock_trigger_cooldown):
+                logger.info(">>> MOCK SESSION TRIGGERED <<<")
+                last_mock_trigger_time = current_time
+
+            # =========================
+            # On-Screen Display (OSD)
+            # =========================
+            # 1. Display Presence Status
+            status_color = (0, 255, 0) if is_present else (0, 0, 255)
+            status_text = f"Status: {'PRESENT' if is_present else 'ABSENT'} | Ratio: {detection_ratio:.2f}"
+            cv2.putText(frame, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, status_color, 2)
+
+            # 2. Display Trigger Alert (Visible for 2 seconds after triggering)
+            if current_time - last_mock_trigger_time < 2.0:
+                cv2.putText(frame, "SESSION TRIGGERED!", (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 0, 0), 3)
+
+            # Render the window
+            cv2.imshow("YOLO Testing View - Press 'q' to exit", frame)
+
+            # Exit condition
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                logger.info("Exit signal received. Terminating test.")
+                break
+
+    except KeyboardInterrupt:
+        logger.info("Interrupted by user.")
+    
+    finally:
+        cap.release()
+        cv2.destroyAllWindows()
+        logger.info("Hardware resources released.")
+
+# =========================
+# Execution
+# =========================
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Test script for YOLO detection and mock session triggering.")
+    parser.add_argument('--weights', type=str, default='best.pt', help='Path to YOLO weights')
+    parser.add_argument('--img', type=int, default=416, help='Inference image size')
+    parser.add_argument('--conf', type=float, default=0.75, help='Confidence threshold')
+    args = parser.parse_args()
+
+    run_test(
+        weights=args.weights,
+        img_size=args.img,
+        conf_thres=args.conf
+    )
