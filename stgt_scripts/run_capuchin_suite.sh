@@ -10,7 +10,7 @@ conda activate capuchinyolo26
 cd /home/capuchin/Desktop/stgt_scripts
 
 # 1. Run the hardware testing phase
-python3 stgt_test.py
+python3 stgt_io_test.py
 
 # 2. Prompt user to proceed or exit
 echo ""
