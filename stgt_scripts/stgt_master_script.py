@@ -145,6 +145,11 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
     BLOCK_LOG_INTERVAL = 2  # sec
     session_number = ""     # Initialized to ensure continuous scope
 
+    # New states for time-window buffer & hysteresis
+    detection_window = deque(maxlen=30)
+    is_present = False
+    last_verified_presence_time = 0
+
     # CSI state
     csi_outs = [None] * len(csi_sources)
     csi_start_times = [None] * len(csi_sources)
@@ -188,15 +193,29 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
             estimated_fps = estimate_fps(time_deque)
 
             # =========================
-            # YOLO Detection
+            # YOLO Detection & Time-Window Buffer
             # =========================
             results = model(frame, imgsz=img_size, conf=conf_thres, iou=0.4, verbose=False)
-            has_detection = len(results[0].boxes) > 0
+            raw_detection = len(results[0].boxes) > 0
+            
+            # Add to rolling window buffer
+            detection_window.append(1 if raw_detection else 0)
+            
+            # Calculate detection ratio over the last ~1 second
+            detection_ratio = sum(detection_window) / len(detection_window) if len(detection_window) > 0 else 0
+
+            # Evaluate Hysteresis / Interaction Bout
+            if detection_ratio >= 0.50:
+                is_present = True
+                last_verified_presence_time = current_time
+            elif is_present and (current_time - last_verified_presence_time > 3.0):
+                # If 3 continuous seconds pass without verified presence, bout ends
+                is_present = False
 
             # =========================
             # USB Recording (independent)
             # =========================
-            if has_detection:
+            if is_present:
                 last_detection_time = current_time
                 if not recording:
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -246,6 +265,11 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                 csi_outs = [None] * len(csi_sources)
                 csi_start_times = [None] * len(csi_sources)
                 csi_filenames = [None] * len(csi_sources)
+                
+                # Start cooldown timer ONLY AFTER the final session in a burst ends
+                if session_count_in_burst >= max_sessions_in_burst:
+                    cooldown_until = current_time + cooldown_time
+                    logger.info(f"Burst limit reached. Cooldown applied for {cooldown_time} seconds")
 
             # =========================
             # Session state-trigger logic
@@ -253,6 +277,7 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
             session_allowed = True
             reason = ""
 
+            # Check if cooldown has expired
             if current_time >= cooldown_until and cooldown_until > 0:
                 session_count_in_burst = 0
                 cooldown_until = 0
@@ -263,10 +288,12 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
             elif session_count_in_burst >= max_sessions_in_burst:
                 session_allowed = False
                 reason = "burst_limit"
-            elif not stgt_started and session_count_in_burst > 0 and (current_time - last_stgt_end_time > burst_interval):
-                session_count_in_burst = 0  # reset burst
+            elif not stgt_started and session_count_in_burst > 0 and (current_time - last_stgt_end_time < burst_interval):
+                # Enforce the 10-second wait interval between the 1st and 2nd session of a burst
+                session_allowed = False
+                reason = "burst_interval_wait"
 
-            if has_detection and session_allowed and not stgt_started:
+            if is_present and session_allowed and not stgt_started:
                 # Start new session
                 session_number = get_next_session_number(log_csv_path)
                 session_count_in_burst += 1
@@ -322,13 +349,8 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                         logger.error(f"Failed to start CSI camera {cam_index}: {e}")
                         csi_outs[i] = None
 
-                # Apply cooldown if burst maxed
-                if session_count_in_burst >= max_sessions_in_burst:
-                    cooldown_until = current_time + cooldown_time
-                    logger.info(f"Cooldown applied for {cooldown_time} seconds")
-
             # Blocked session logging
-            elif has_detection and not session_allowed:
+            elif is_present and not session_allowed:
                 if current_time - last_blocked_log_time > 2:
                     csv_writer.writerow([
                         datetime.now().isoformat(),
@@ -379,4 +401,3 @@ if __name__ == "__main__":
         conf_thres=args.conf,
         csi_sources=args.csi
     )
-
