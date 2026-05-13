@@ -2,7 +2,6 @@
 
 import os
 import time
-import cv2
 import subprocess
 import RPi.GPIO as GPIO
 from datetime import datetime
@@ -119,51 +118,70 @@ try:
     
     if os.path.exists(usb_device_symlink):
         real_usb_device = os.path.realpath(usb_device_symlink)
-        cap = cv2.VideoCapture(real_usb_device, cv2.CAP_V4L2)
-        if cap.isOpened():
-            start_cam = time.time()
-            frames = 0
-            while time.time() - start_cam < cam_dur:
-                ret, frame = cap.read()
-                if ret:
-                    frames += 1
-                    # Show the frame in an OpenCV window
-                    cv2.imshow("USB Camera Preview", frame)
-                    cv2.waitKey(1)  # Required to render the window
-            cap.release()
-            cv2.destroyAllWindows() # Close the window after duration ends
-            print(f"{datetime.now().isoformat()} USB camera test successful. Read {frames} frames.")
-        else:
-            print(f"{datetime.now().isoformat()} Failed to open USB camera at {real_usb_device}.")
+        try:
+            # Using ffplay (native to Pi) instead of OpenCV
+            proc_usb = subprocess.Popen([
+                "ffplay", 
+                "-f", "v4l2", 
+                "-framerate", "15", 
+                "-video_size", "640x480", 
+                "-t", str(cam_dur), 
+                "-autoexit", 
+                "-window_title", "USB Camera Preview", 
+                real_usb_device
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            proc_usb.wait()
+            print(f"{datetime.now().isoformat()} USB camera test completed.")
+        except FileNotFoundError:
+            print(f"{datetime.now().isoformat()} Error: 'ffplay' not found. Please install ffmpeg.")
     else:
         print(f"{datetime.now().isoformat()} USB camera path does not exist: {usb_device_symlink}")
 
-    for cam_index in [0, 1]:
-        # Wait for user input before opening the next camera
-        input(f"\nPress Enter to test CSI camera {cam_index}...")
-        print(f"{datetime.now().isoformat()} Testing CSI camera {cam_index} for {cam_dur} seconds...")
-        try:
-            tmp_output = f"/tmp/test_csi_cam{cam_index}.mp4"
+    # Wait for user input before opening the dual CSI cameras
+    input(f"\nPress Enter to test BOTH CSI cameras side-by-side...")
+    print(f"{datetime.now().isoformat()} Testing CSI cameras 0 and 1 for {cam_dur} seconds...")
+    try:
+        tmp_output0 = f"/tmp/test_csi_cam0.mp4"
+        tmp_output1 = f"/tmp/test_csi_cam1.mp4"
+        
+        # Launch Camera 0 (Positioned on the left: X=50, Y=100)
+        proc0 = subprocess.Popen([
+            "rpicam-vid",
+            "-t", str(int(cam_dur * 1000)),
+            "--preview", "50,100,640,480", 
+            "--inline",
+            "--width", "640",
+            "--height", "480",
+            "--framerate", "15",
+            "--camera", "0",
+            "-o", tmp_output0
+        ])
+        
+        # Launch Camera 1 (Positioned on the right: X=700, Y=100)
+        proc1 = subprocess.Popen([
+            "rpicam-vid",
+            "-t", str(int(cam_dur * 1000)),
+            "--preview", "700,100,640,480", 
+            "--inline",
+            "--width", "640",
+            "--height", "480",
+            "--framerate", "15",
+            "--camera", "1",
+            "-o", tmp_output1
+        ])
+        
+        # Wait for both windows to automatically close after the duration
+        proc0.wait()
+        proc1.wait()
+        
+        # Clean up temporary files
+        for tmp_file in [tmp_output0, tmp_output1]:
+            if os.path.exists(tmp_file):
+                os.remove(tmp_file)
             
-            # Removed the '-n' flag to allow the preview window to appear
-            proc = subprocess.Popen([
-                "rpicam-vid",
-                "-t", str(int(cam_dur * 1000)),
-                "--inline",
-                "--width", "640",
-                "--height", "480",
-                "--framerate", "15",
-                "--camera", str(cam_index),
-                "-o", tmp_output
-            ])
-            proc.wait() # Automatically closes the preview window when done
-            
-            if os.path.exists(tmp_output):
-                os.remove(tmp_output)
-                
-            print(f"{datetime.now().isoformat()} CSI camera {cam_index} test completed.")
-        except Exception as e:
-            print(f"{datetime.now().isoformat()} Failed to test CSI camera {cam_index}: {e}")
+        print(f"{datetime.now().isoformat()} Dual CSI camera test completed.")
+    except Exception as e:
+        print(f"{datetime.now().isoformat()} Failed to test CSI cameras: {e}")
 
     print(f"\n{datetime.now().isoformat()} ========== TESTING PHASE COMPLETE ==========")
 
