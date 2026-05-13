@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import os
 import time
 import cv2
 import subprocess
@@ -95,7 +96,7 @@ try:
     
     beam_break_count = 0
     def beam_callback(channel):
-        nonlocal beam_break_count
+        global beam_break_count
         beam_break_count += 1
         print(f"{datetime.now().isoformat()} Beam break detected. Total: {beam_break_count}")
 
@@ -108,47 +109,63 @@ try:
 
     # 6) Camera tests
     try:
-        cam_dur = float(input("\nEnter duration to test each camera (seconds): "))
+        cam_dur = float(input("\nEnter duration to show each camera preview (seconds): "))
     except ValueError:
         cam_dur = 5.0
         print(f"{datetime.now().isoformat()} Invalid input, defaulting to 5.0 seconds.")
 
-    print(f"{datetime.now().isoformat()} Testing USB camera...")
-    usb_device = "/dev/v4l/by-id/usb-046d_HD_Pro_Webcam_C920_99F8F02F-video-index0"
-    cap = cv2.VideoCapture(usb_device, cv2.CAP_V4L2)
-    if cap.isOpened():
-        start_cam = time.time()
-        frames = 0
-        while time.time() - start_cam < cam_dur:
-            ret, frame = cap.read()
-            if ret:
-                frames += 1
-        cap.release()
-        print(f"{datetime.now().isoformat()} USB camera test successful. Read {frames} frames.")
+    print(f"\n{datetime.now().isoformat()} Testing USB camera...")
+    usb_device_symlink = "/dev/v4l/by-id/usb-046d_HD_Pro_Webcam_C920_99F8F02F-video-index0"
+    
+    if os.path.exists(usb_device_symlink):
+        real_usb_device = os.path.realpath(usb_device_symlink)
+        cap = cv2.VideoCapture(real_usb_device, cv2.CAP_V4L2)
+        if cap.isOpened():
+            start_cam = time.time()
+            frames = 0
+            while time.time() - start_cam < cam_dur:
+                ret, frame = cap.read()
+                if ret:
+                    frames += 1
+                    # Show the frame in an OpenCV window
+                    cv2.imshow("USB Camera Preview", frame)
+                    cv2.waitKey(1)  # Required to render the window
+            cap.release()
+            cv2.destroyAllWindows() # Close the window after duration ends
+            print(f"{datetime.now().isoformat()} USB camera test successful. Read {frames} frames.")
+        else:
+            print(f"{datetime.now().isoformat()} Failed to open USB camera at {real_usb_device}.")
     else:
-        print(f"{datetime.now().isoformat()} Failed to open USB camera.")
+        print(f"{datetime.now().isoformat()} USB camera path does not exist: {usb_device_symlink}")
 
     for cam_index in [0, 1]:
+        # Wait for user input before opening the next camera
+        input(f"\nPress Enter to test CSI camera {cam_index}...")
         print(f"{datetime.now().isoformat()} Testing CSI camera {cam_index} for {cam_dur} seconds...")
         try:
-            # Using /dev/null to test camera operation without writing a permanent file
+            tmp_output = f"/tmp/test_csi_cam{cam_index}.mp4"
+            
+            # Removed the '-n' flag to allow the preview window to appear
             proc = subprocess.Popen([
                 "rpicam-vid",
                 "-t", str(int(cam_dur * 1000)),
-                "-n",
                 "--inline",
                 "--width", "640",
                 "--height", "480",
                 "--framerate", "15",
                 "--camera", str(cam_index),
-                "-o", "/dev/null"
+                "-o", tmp_output
             ])
-            proc.wait()
+            proc.wait() # Automatically closes the preview window when done
+            
+            if os.path.exists(tmp_output):
+                os.remove(tmp_output)
+                
             print(f"{datetime.now().isoformat()} CSI camera {cam_index} test completed.")
         except Exception as e:
             print(f"{datetime.now().isoformat()} Failed to test CSI camera {cam_index}: {e}")
 
-    print(f"{datetime.now().isoformat()} ========== TESTING PHASE COMPLETE ==========")
+    print(f"\n{datetime.now().isoformat()} ========== TESTING PHASE COMPLETE ==========")
 
 except KeyboardInterrupt:
     print(f"\n{datetime.now().isoformat()} Testing phase interrupted by user.")
