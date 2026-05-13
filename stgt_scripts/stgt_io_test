@@ -16,29 +16,11 @@ relay_mgz = 22
 mgz_beam_pin = 21
 
 # =========================
-# GPIO SETUP
+# TEST FUNCTIONS
 # =========================
-GPIO.setmode(GPIO.BCM)
-GPIO.setwarnings(False)
-
-try:
-    # Setup pins
-    GPIO.setup(relay_lv_out, GPIO.OUT)
-    GPIO.setup(relay_mgz, GPIO.OUT)
-    GPIO.setup(relay_cue_light, GPIO.OUT)
-    GPIO.setup(lv_press_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-    GPIO.setup(mgz_beam_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-
-    # Initial relay state (True = OFF/Retracted)
-    GPIO.output(relay_lv_out, True)
-    GPIO.output(relay_mgz, True)
-    GPIO.output(relay_cue_light, True)
-
-    print(f"{datetime.now().isoformat()} ========== HARDWARE TESTING PHASE ==========")
-
-    # 1 & 2) Lever extension and press test
+def test_lever():
     try:
-        lv_dur = float(input("Enter duration to extend the lever (seconds): "))
+        lv_dur = float(input("\nEnter duration to extend the lever (seconds): "))
     except ValueError:
         lv_dur = 5.0
         print(f"{datetime.now().isoformat()} Invalid input, defaulting to 5.0 seconds.")
@@ -52,7 +34,6 @@ try:
     
     while time.time() - start_time < lv_dur:
         current_state = GPIO.input(lv_press_pin)
-        # Detect HIGH to LOW transition
         if last_state == GPIO.HIGH and current_state == GPIO.LOW:
             press_count += 1
             print(f"{datetime.now().isoformat()} Lever press detected. Total: {press_count}")
@@ -62,7 +43,8 @@ try:
     GPIO.output(relay_lv_out, True)
     print(f"{datetime.now().isoformat()} Lever retracted.")
 
-    # 3) Cue light test
+
+def test_cue_light():
     try:
         cue_dur = float(input("\nEnter duration to turn on the cue light (seconds): "))
     except ValueError:
@@ -75,7 +57,8 @@ try:
     GPIO.output(relay_cue_light, True)
     print(f"{datetime.now().isoformat()} Cue light turned off.")
 
-    # 4) Magazine relay test
+
+def test_magazine():
     print(f"\n{datetime.now().isoformat()} Starting magazine relay test. You will need to press Enter 3 times.")
     for i in range(3):
         input(f"Test {i + 1}/3: Press Enter to turn on relay_mgz for 0.01s...")
@@ -84,7 +67,8 @@ try:
         GPIO.output(relay_mgz, True)
         print(f"{datetime.now().isoformat()} Relay activated.")
 
-    # 5) Beam break test
+
+def test_beam():
     try:
         beam_dur = float(input("\nEnter duration to test the beam break (seconds): "))
     except ValueError:
@@ -95,86 +79,84 @@ try:
     
     beam_break_count = 0
     def beam_callback(channel):
-        global beam_break_count
+        nonlocal beam_break_count  # Correct syntax since this is now nested inside a function
         beam_break_count += 1
         print(f"{datetime.now().isoformat()} Beam break detected. Total: {beam_break_count}")
 
     GPIO.add_event_detect(mgz_beam_pin, GPIO.FALLING, callback=beam_callback, bouncetime=200)
-    
     time.sleep(beam_dur)
-    
     GPIO.remove_event_detect(mgz_beam_pin)
     print(f"{datetime.now().isoformat()} Beam break test completed.")
 
-    # 6) Camera tests
+
+def test_usb_camera():
     try:
-        cam_dur = float(input("\nEnter duration to show each camera preview (seconds): "))
+        cam_dur = float(input("\nEnter duration to show USB camera preview (seconds): "))
     except ValueError:
         cam_dur = 5.0
         print(f"{datetime.now().isoformat()} Invalid input, defaulting to 5.0 seconds.")
 
     print(f"\n{datetime.now().isoformat()} Testing USB camera...")
-    usb_device_symlink = "/dev/v4l/by-id/usb-046d_HD_Pro_Webcam_C920_99F8F02F-video-index0"
+    usb_device_symlink = "/dev/video0"
     
     if os.path.exists(usb_device_symlink):
         real_usb_device = os.path.realpath(usb_device_symlink)
         try:
-            # Using ffplay (native to Pi) instead of OpenCV
+            # Removed the -t flag and will rely on Python to forcibly close it instead
             proc_usb = subprocess.Popen([
                 "ffplay", 
                 "-f", "v4l2", 
                 "-framerate", "15", 
                 "-video_size", "640x480", 
-                "-t", str(cam_dur), 
-                "-autoexit", 
                 "-window_title", "USB Camera Preview", 
                 real_usb_device
             ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            proc_usb.wait()
+            
+            try:
+                # Wait for the specific duration, then kill the process
+                proc_usb.wait(timeout=cam_dur)
+            except subprocess.TimeoutExpired:
+                proc_usb.terminate()
+                proc_usb.wait()
+                
             print(f"{datetime.now().isoformat()} USB camera test completed.")
         except FileNotFoundError:
             print(f"{datetime.now().isoformat()} Error: 'ffplay' not found. Please install ffmpeg.")
     else:
         print(f"{datetime.now().isoformat()} USB camera path does not exist: {usb_device_symlink}")
 
-    # Wait for user input before opening the dual CSI cameras
-    input(f"\nPress Enter to test BOTH CSI cameras side-by-side...")
-    print(f"{datetime.now().isoformat()} Testing CSI cameras 0 and 1 for {cam_dur} seconds...")
+
+def test_csi_cameras():
+    try:
+        cam_dur = float(input("\nEnter duration to show CSI cameras preview (seconds): "))
+    except ValueError:
+        cam_dur = 5.0
+        print(f"{datetime.now().isoformat()} Invalid input, defaulting to 5.0 seconds.")
+
+    print(f"\n{datetime.now().isoformat()} Testing CSI cameras 0 and 1 side-by-side for {cam_dur} seconds...")
     try:
         tmp_output0 = f"/tmp/test_csi_cam0.mp4"
         tmp_output1 = f"/tmp/test_csi_cam1.mp4"
         
-        # Launch Camera 0 (Positioned on the left: X=50, Y=100)
         proc0 = subprocess.Popen([
             "rpicam-vid",
             "-t", str(int(cam_dur * 1000)),
-            "--preview", "50,100,640,480", 
-            "--inline",
-            "--width", "640",
-            "--height", "480",
-            "--framerate", "15",
-            "--camera", "0",
-            "-o", tmp_output0
+            "--preview", "10,50,400,300", 
+            "--inline", "--width", "640", "--height", "480", "--framerate", "15",
+            "--camera", "0", "-o", tmp_output0
         ])
         
-        # Launch Camera 1 (Positioned on the right: X=700, Y=100)
         proc1 = subprocess.Popen([
             "rpicam-vid",
             "-t", str(int(cam_dur * 1000)),
-            "--preview", "700,100,640,480", 
-            "--inline",
-            "--width", "640",
-            "--height", "480",
-            "--framerate", "15",
-            "--camera", "1",
-            "-o", tmp_output1
+            "--preview", "420,50,400,300", 
+            "--inline", "--width", "640", "--height", "480", "--framerate", "15",
+            "--camera", "1", "-o", tmp_output1
         ])
         
-        # Wait for both windows to automatically close after the duration
         proc0.wait()
         proc1.wait()
         
-        # Clean up temporary files
         for tmp_file in [tmp_output0, tmp_output1]:
             if os.path.exists(tmp_file):
                 os.remove(tmp_file)
@@ -183,10 +165,76 @@ try:
     except Exception as e:
         print(f"{datetime.now().isoformat()} Failed to test CSI cameras: {e}")
 
-    print(f"\n{datetime.now().isoformat()} ========== TESTING PHASE COMPLETE ==========")
 
-except KeyboardInterrupt:
-    print(f"\n{datetime.now().isoformat()} Testing phase interrupted by user.")
+def test_all():
+    test_lever()
+    test_cue_light()
+    test_magazine()
+    test_beam()
+    test_usb_camera()
+    input("\nPress Enter to test BOTH CSI cameras side-by-side...")
+    test_csi_cameras()
 
-finally:
-    GPIO.cleanup()
+
+# =========================
+# MAIN INITIALIZATION
+# =========================
+if __name__ == "__main__":
+    GPIO.setmode(GPIO.BCM)
+    GPIO.setwarnings(False)
+
+    try:
+        # Setup pins
+        GPIO.setup(relay_lv_out, GPIO.OUT)
+        GPIO.setup(relay_mgz, GPIO.OUT)
+        GPIO.setup(relay_cue_light, GPIO.OUT)
+        GPIO.setup(lv_press_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+        GPIO.setup(mgz_beam_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+
+        # Initial relay state (True = OFF/Retracted)
+        GPIO.output(relay_lv_out, True)
+        GPIO.output(relay_mgz, True)
+        GPIO.output(relay_cue_light, True)
+
+        print(f"\n{datetime.now().isoformat()} ========== HARDWARE TESTING PHASE ==========")
+
+        while True:
+            print("\n--- STGT Hardware Test Menu ---")
+            print("1. Test Lever Extension & Press")
+            print("2. Test Cue Light")
+            print("3. Test Magazine Relay")
+            print("4. Test Magazine Beam Break")
+            print("5. Test USB Camera")
+            print("6. Test CSI Cameras (Side-by-side)")
+            print("7. Test ALL Components Sequentially")
+            print("8. Exit Testing Phase")
+            
+            choice = input("\nEnter your choice (1-8): ").strip()
+            
+            if choice == '1':
+                test_lever()
+            elif choice == '2':
+                test_cue_light()
+            elif choice == '3':
+                test_magazine()
+            elif choice == '4':
+                test_beam()
+            elif choice == '5':
+                test_usb_camera()
+            elif choice == '6':
+                test_csi_cameras()
+            elif choice == '7':
+                test_all()
+            elif choice == '8':
+                print(f"\n{datetime.now().isoformat()} Exiting test menu.")
+                break
+            else:
+                print("Invalid choice. Please enter a number from 1 to 8.")
+
+        print(f"\n{datetime.now().isoformat()} ========== TESTING PHASE COMPLETE ==========")
+
+    except KeyboardInterrupt:
+        print(f"\n{datetime.now().isoformat()} Testing phase interrupted by user.")
+
+    finally:
+        GPIO.cleanup()
