@@ -116,7 +116,7 @@ def get_next_session_number(csv_path):
 # =========================
 # Main run
 # =========================
-def run(weights='best.pt', img_size=416, conf_thres=0.5, csi_sources=[]):
+def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
 
     # Load schedule
     max_trial, lever_dur, itt_base, itt_jitter = configure_schedule()
@@ -155,7 +155,7 @@ def run(weights='best.pt', img_size=416, conf_thres=0.5, csi_sources=[]):
     model = YOLO(weights)
 
     # Open USB camera
-    device = "/dev/v4l/by-id/usb-046d_HD_Pro_Webcam_C920_99F8F02F-video-index0"
+    device = "/dev/video0"
     logger.info(f"Using USB camera: {device}")
     cap = cv2.VideoCapture(device, cv2.CAP_V4L2)
     if not cap.isOpened():
@@ -369,7 +369,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--weights', type=str, default='best.pt')
     parser.add_argument('--img', type=int, default=416)
-    parser.add_argument('--conf', type=float, default=0.5)
+    parser.add_argument('--conf', type=float, default=0.75)
     parser.add_argument('--csi', type=int, nargs='+', default=[])
     args = parser.parse_args()
 
