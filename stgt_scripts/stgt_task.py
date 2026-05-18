@@ -1,211 +1,194 @@
-# RPi pins that might have been burnt: (BCM) 21,16,12,25,24,(23?)
-
 #!/usr/bin/env python3
 
 import sys
 import time
 import csv
-from pathlib import Path
 from datetime import datetime
 import RPi.GPIO as GPIO
 import random
 import argparse
 
-
 # =========================
-# STGT task settings
+# Arguments & Parameters
 # =========================
-# max_trial = 10 
-# lever_dur = 7
-# itt_base = 25
-# itt_jitter = 5
-
 parser = argparse.ArgumentParser()
-
 parser.add_argument("--execution_id", type=str)
 parser.add_argument("--session_number", type=int, default=1)
-parser.add_argument("--max_trial", type=int, default=10)
-parser.add_argument("--lever_dur", type=float, default=1)
-parser.add_argument("--itt_base", type=float, default=5)
-parser.add_argument("--itt_jitter", type=float, default=2)
-
+parser.add_argument("--max_trial", type=int, default=5)
+parser.add_argument("--lever_dur", type=float, default=2.0)
+parser.add_argument("--iti_base", type=float, default=2.0)
+parser.add_argument("--iti_jitter", type=float, default=1.0)
+parser.add_argument("--buffer_dur", type=float, default=5.0)
+parser.add_argument("--data_csv_path", type=str, required=True)
+parser.add_argument("--t0", type=float, required=True)
 args = parser.parse_args()
 
-execution_id = args.execution_id or datetime.now().strftime("%Y%m%d_%H%M%S")
-session_number = int(args.session_number)
+execution_id = args.execution_id
+session_number = args.session_number
 max_trial = args.max_trial
 lever_dur = args.lever_dur
-itt_base = args.itt_base
-itt_jitter = args.itt_jitter
+iti_base = args.iti_base
+iti_jitter = args.iti_jitter
+buffer_dur = args.buffer_dur
+data_csv_path = args.data_csv_path
+t0 = args.t0
 
 # =========================
-# STGT DATA DIRECTORY
+# Data Logging Helper
 # =========================
-stgt_data_dir = Path("/home/capuchin/stgt_data/task_data")
-stgt_data_dir.mkdir(parents=True, exist_ok=True)  # ensure folder exists
-
-
-# =========================
-# CSV FILE NAMING
-# =========================
-csv_filename = f"stgt_{execution_id}.csv"  # one CSV per execution
-csv_path = stgt_data_dir / csv_filename
-print(f"[INFO] STGT CSV file will be saved to: {csv_path.resolve()}")
+def log_event(ev_name, item_name, value=""):
+    ms = int((time.time() - t0) * 1000)
+    try:
+        with open(data_csv_path, "a", newline="") as f:
+            csv.writer(f).writerow([ms, ev_name, item_name, value])
+    except Exception as e:
+        print(f"[ERROR] Failed to write to CSV: {e}")
 
 # =========================
-# GPIO PINS
+# GPIO PINS & SETUP
 # =========================
 relay_lv_out = 19
 lv_press_pin = 13
 relay_cue_light = 12
-relay_mgz = 22
-mgz_beam_pin = 21
+relay_dispenser = 22
+foodcup_beam_pin = 21
 
-
-# =========================
-# GPIO SETUP
-# =========================
 GPIO.setmode(GPIO.BCM)
-
 try:
     GPIO.setup(relay_lv_out, GPIO.OUT)
     GPIO.setup(relay_cue_light, GPIO.OUT)
-    GPIO.setup(relay_mgz, GPIO.OUT)
+    GPIO.setup(relay_dispenser, GPIO.OUT)
+    # Using BOTH to capture Tray On and Off
     GPIO.setup(lv_press_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-    GPIO.setup(mgz_beam_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+    GPIO.setup(foodcup_beam_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 
-    # Initial relay state
     GPIO.output(relay_lv_out, True)
-    GPIO.output(relay_mgz, True)
-
+    GPIO.output(relay_dispenser, True)
+    GPIO.output(relay_cue_light, True)
 except Exception as e:
     print(f"[ERROR] GPIO setup failed: {e}")
+    log_event("Error Event", "GPIO_Setup", f"Failed: {e}")
     sys.exit(1)
 
 # =========================
-# CALLBACK AND GLOBALS
+# GLOBALS & CALLBACKS
 # =========================
-mgz_reach_trial = 0
-mgz_reach_itt = 0
 phase = "idle"
+session_lever_counts = 0
+session_foodcup_cs_entries = 0
+session_foodcup_iti_entries = 0
 
-def magazine_callback(channel):
-    global mgz_reach_trial, mgz_reach_itt, phase
-    if phase == "lever":
-        mgz_reach_trial += 1
-        print(f"[{datetime.now().isoformat()}] magazine reach (trial)")
-    elif phase == "itt":
-        mgz_reach_itt += 1
-        print(f"[{datetime.now().isoformat()}] magazine reach (ITT)")
+def foodcup_callback(channel):
+    global session_foodcup_cs_entries, session_foodcup_iti_entries
+    state = GPIO.input(foodcup_beam_pin)
+    
+    if state == GPIO.LOW:  # Beam Broken
+        log_event("Input Event", "Foodcup_Entry_On")
+        log_event("Condition Event", "Foodcup_Activate")
+        if phase == "lever":
+            session_foodcup_cs_entries += 1
+            log_event("Variable Event", "Session_Foodcup_CS_Entries", session_foodcup_cs_entries)
+        elif phase == "iti":
+            session_foodcup_iti_entries += 1
+            log_event("Variable Event", "Session_Foodcup_ITI_Entries", session_foodcup_iti_entries)
+    else:  # Beam Restored
+        log_event("Input Event", "Foodcup_Entry_Off")
 
-GPIO.add_event_detect(mgz_beam_pin, GPIO.FALLING, callback=magazine_callback, bouncetime=200)
-
-# =========================
-# CSV SETUP
-# =========================
-csv_exists = csv_path.exists()
-csv_file = open(csv_path, "a", newline="")
-csv_writer = csv.writer(csv_file)
-
-if not csv_exists:
-
-    # ---- Write Schedule Metadata ----
-    csv_writer.writerow(["# SCHEDULE"])
-    csv_writer.writerow(["execution_id", execution_id])
-    csv_writer.writerow(["max_trial", max_trial])
-    csv_writer.writerow(["lever_dur", lever_dur])
-    csv_writer.writerow(["itt_base", itt_base])
-    csv_writer.writerow(["itt_jitter", itt_jitter])
-    csv_writer.writerow([])  # blank line
-
-    # ---- Write Trial Header ----
-    csv_writer.writerow([
-        "execution_id",
-        "session",
-        "trial",
-        "lever_presses",
-        "magazine_reaches_trial",
-        "magazine_reaches_itt",
-        "itt_duration",
-        "timestamp"
-    ])
+GPIO.add_event_detect(foodcup_beam_pin, GPIO.BOTH, callback=foodcup_callback, bouncetime=100)
 
 # =========================
-# MAIN TRIAL LOOP
+# MAIN SESSION LOGIC
 # =========================
 try:
+    print(f"[INFO] STGT Subprocess {session_number} Initialized")
+    
+    # Session Resets
+    log_event("Variable Event", "Session_Counter", session_number)
+    log_event("Variable Event", "Trial_Counter", 0)
+    log_event("Variable Event", "Session_Lever_Counts", 0)
+    log_event("Variable Event", "Session_Foodcup_CS_Entries", 0)
+    log_event("Variable Event", "Session_Foodcup_ITI_Entries", 0)
 
+    # ----- PRE-TRIAL BUFFER -----
+    log_event("Condition Event", "Phase_Transition", "Pre_Trial_Buffer")
+    phase = "buffer"
+    log_event("Variable Event", "Task_Phase_State", "buffer")
+    
+    print(f"[{datetime.now().isoformat()}] Buffer started ({buffer_dur}s)")
+    time.sleep(buffer_dur)
+    log_event("Timer Event", "Buffer_Timer", int(buffer_dur * 1000))
+
+    # ----- TRIAL LOOP -----
     for trial_n in range(max_trial):
-        lv_press_count = 0
-        mgz_reach_trial = 0
-        mgz_reach_itt = 0
+        log_event("Condition Event", "Phase_Transition", "Trial_Start")
+        log_event("Variable Event", "Trial_Counter", trial_n + 1)
+        
+        trial_iti = random.uniform(iti_base - iti_jitter, iti_base + iti_jitter)
+        log_event("Variable Event", "ITI_Value", round(trial_iti, 3))
 
-        # ----- LEVER PHASE -----
+        # ----- CS (LEVER) PHASE -----
+        log_event("Condition Event", "Phase_Transition", "CS_Active")
         phase = "lever"
+        log_event("Variable Event", "Task_Phase_State", "lever")
+        
         GPIO.output(relay_lv_out, False)
         GPIO.output(relay_cue_light, False)
+        log_event("Output Event", "Lever_Extend_On")
+        log_event("Output Event", "Cue_Light_On")
+        
         start_time = time.time()
-
-        # Edge detection: track previous lever state; holding = 1 press
         last_state = GPIO.input(lv_press_pin)
 
+        # Polling for Lever (Allows On & Off capture during CS window)
         while time.time() - start_time < lever_dur:
             current_state = GPIO.input(lv_press_pin)
-            # Detect HIGH -> LOW transition
             if last_state == GPIO.HIGH and current_state == GPIO.LOW:
-                lv_press_count += 1
+                log_event("Input Event", "Lever_Press_On")
+                log_event("Condition Event", "Lever_Activate")
+                session_lever_counts += 1
+                log_event("Variable Event", "Session_Lever_Counts", session_lever_counts)
                 print(f"[{datetime.now().isoformat()}] lever pressed")
+            elif last_state == GPIO.LOW and current_state == GPIO.HIGH:
+                log_event("Input Event", "Lever_Press_Off")
+            
             last_state = current_state
-            time.sleep(0.05) 
+            time.sleep(0.01) 
 
+        log_event("Timer Event", "CS_Timer", int(lever_dur * 1000))
+
+        # ----- REWARD PHASE -----
+        log_event("Condition Event", "Phase_Transition", "Reward_Dispense")
+        
         GPIO.output(relay_lv_out, True)
         GPIO.output(relay_cue_light, True)
+        log_event("Output Event", "Lever_Extend_Off")
+        log_event("Output Event", "Cue_Light_Off")
 
-        # ----- REWARD -----
-        GPIO.output(relay_mgz, False)
-        print(f"[{datetime.now().isoformat()}] dispensing reward")
+        # Pulse Dispenser
+        GPIO.output(relay_dispenser, False)
+        log_event("Pulse Output Event", "Dispenser", 0.01)
         time.sleep(0.01)
-        GPIO.output(relay_mgz, True)
+        GPIO.output(relay_dispenser, True)
+        print(f"[{datetime.now().isoformat()}] dispensing reward")
 
-        # ----- ITT -----
-        phase = "itt"
-        print(f"[{datetime.now().isoformat()}] ITT started")
+        # ----- ITI PHASE -----
+        log_event("Condition Event", "Phase_Transition", "ITI_Active")
+        phase = "iti"
+        log_event("Variable Event", "Task_Phase_State", "iti")
         
-        trial_itt = random.uniform(itt_base - itt_jitter,
-                             itt_base + itt_jitter)
-
-        print(f"[{datetime.now().isoformat()}] ITT started. Scheduled duration: {trial_itt:.2f}s")
+        print(f"[{datetime.now().isoformat()}] ITI started: {trial_iti:.2f}s")
+        time.sleep(trial_iti)
+        log_event("Timer Event", "ITI_Timer", int(trial_iti * 1000))
         
-        time.sleep(trial_itt)
-        
-        phase = "idle"
-
-        # ----- SAVE TRIAL -----
-        csv_writer.writerow([
-            execution_id,
-            session_number,
-            trial_n + 1,
-            lv_press_count,
-            mgz_reach_trial,
-            mgz_reach_itt,
-            trial_itt,
-            datetime.now().isoformat()
-        ])
-
-        csv_file.flush()
-
         print(f"[{datetime.now().isoformat()}] Trial {trial_n + 1} completed")
-        print(f"    lever presses: {lv_press_count}")
-        print(f"    mag reaches (trial): {mgz_reach_trial}")
-        print(f"    mag reaches (ITT): {mgz_reach_itt}")
 
-    print(f"[INFO] STGT session completed")
+    log_event("Condition Event", "Session_End", "Complete")
 
 except KeyboardInterrupt:
-    print("[INFO] STGT session interrupted")
-
+    print("\n[INFO] STGT session interrupted")
+    log_event("System Event", "Task_Subprocess", "Interrupted by user")
 finally:
-    GPIO.cleanup()  # only cleanup once at the very end
-    csv_file.close()
-    print("[INFO] GPIO cleaned up, CSV saved")
-
+    phase = "idle"
+    log_event("Variable Event", "Task_Phase_State", "idle")
+    GPIO.cleanup()
+    print("[INFO] Subprocess complete, GPIO cleaned up")
