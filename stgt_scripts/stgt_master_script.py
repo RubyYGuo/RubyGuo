@@ -355,3 +355,7 @@ if __name__ == "__main__":
     parser.add_argument('--weights', type=str, default='best.pt')
     parser.add_argument('--img', type=int, default=416)
     parser.add_argument('--conf', type=float, default=0.75)
+    parser.add_argument('--csi', type=int, nargs='+', default=[])
+    args = parser.parse_args()
+
+    run(weights=args.weights, img_size=args.img, conf_thres=args.conf, csi_sources=args.csi)
