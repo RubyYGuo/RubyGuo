@@ -1,16 +1,3 @@
-# Stopping CSI camera recording when stgt session ends. Now figure out:
-### If an animal is at the box for a long time (I'll call it "interaction bout" for now), do we want to trigger only one session, or keep triggering the next?
-### right now only new face detection triggers the task; if the animal is always in camera then the next session won't be triggered.
-### If we don't want the session to be triggered constantly, need to prevent the case when facial detection briefly fails and comes back ("new detection" same interaction bout)
-### waiting time between sessions e.g. min 5min?
-
-#### ideally: 12 trials per session, 2 sesseions in a row max per individual
-#### current: we can't yet tell apart individuals; 2 sessions in a row (within 10 sec apart) at most and then wait for 5min to trigger the next"
-# left off March20: made session triggering based on detection status (if animal is always there, possible to trigger a 2nd session) instead of recording status
-# todo: 3rd session still gets triggered, with error mossages from the usb camera.
-
-
-# video storage (e.g., hard drive)
 #!/usr/bin/env python3
 
 import torch
@@ -18,35 +5,46 @@ import cv2
 import argparse
 import time
 import csv
-import logging
 from pathlib import Path
 from datetime import datetime
 from collections import deque
 import subprocess
-import re
 import signal
 from ultralytics import YOLO
 
 # =========================
-# Logging setup
+# Setup & Initialization
 # =========================
 execution_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+T0 = time.time()  # Master Baseline Time
 
 stgt_data_dir = Path("/home/capuchin/stgt_data/task_data")
 stgt_data_dir.mkdir(parents=True, exist_ok=True)
 
-log_file_path = stgt_data_dir / f"session_log_{execution_id}.txt"
+# Video tracking CSV
+record_dir = Path("/home/capuchin/stgt_data/video_recordings")
+record_dir.mkdir(exist_ok=True)
+video_csv_path = record_dir / f"sessions_{execution_id}.csv"
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler(log_file_path),
-        logging.StreamHandler()
-    ]
-)
+# Main Data Log CSV
+data_csv_path = stgt_data_dir / f"data_{execution_id}.csv"
 
-logger = logging.getLogger(__name__)
+# Initialize Header & Event Time 0
+with open(data_csv_path, "w", newline="") as f:
+    writer = csv.writer(f)
+    writer.writerow(["Event Time", "Event Name", "Item Name", "Value"])
+    writer.writerow([0, "Condition Event", "Execution_Start", execution_id])
+    writer.writerow([0, "Timer Event", "Execution_timer", 0])
+    writer.writerow([0, "Condition Event", "Execution timer activated", ""])
+    writer.writerow([0, "Variable Event", "Face_Detection", 0])
+    writer.writerow([0, "Variable Event", "Station_Active", 0])
+    writer.writerow([0, "Variable Event", "Subject_Present_Flag", 0])
+    writer.writerow([0, "Variable Event", "YOLO_Detection_Ratio", "0.00"])
+
+def log_event(ev_name, item_name, value=""):
+    ms = int((time.time() - T0) * 1000)
+    with open(data_csv_path, "a", newline="") as f:
+        csv.writer(f).writerow([ms, ev_name, item_name, value])
 
 # =========================
 # Hardware Diagnostics
@@ -57,12 +55,9 @@ def get_cpu_temp():
             temp = int(f.read().strip()) / 1000.0
         return round(temp, 1)
     except Exception as e:
-        logger.error(f"Failed to read CPU temperature: {e}")
+        log_event("Error Event", "CPU_Temperature", "Failed to read")
         return "N/A"
 
-# =========================
-# FPS Helper
-# =========================
 def estimate_fps(time_deque):
     if len(time_deque) < 2:
         return 30.0
@@ -73,62 +68,36 @@ def estimate_fps(time_deque):
 # Schedule config
 # =========================
 def configure_schedule():
-    logger.info("========== STGT SCHEDULE CONFIG ==========")
-    max_trial, lever_dur, itt_base, itt_jitter = 5, 2, 2, 1
-    logger.info(f"Current settings: max_trial={max_trial}, lever_dur={lever_dur}, itt={itt_base} ± {itt_jitter}")
+    print("\n========== STGT SCHEDULE CONFIG ==========")
+    max_trial, lever_dur, iti_base, iti_jitter, buffer_dur = 5, 2, 2, 1, 5
+    print(f"Current settings: max_trial={max_trial}, lever_dur={lever_dur}, iti={iti_base} ± {iti_jitter}, buffer={buffer_dur}")
     choice = input("\nModify settings? (y/n): ").strip().lower()
     if choice == "y":
         max_trial = int(input("Enter max_trial: ") or max_trial)
         lever_dur = float(input("Enter lever_dur: ") or lever_dur)
-        itt_base = float(input("Enter itt_base: ") or itt_base)
-        itt_jitter = float(input("Enter itt_jitter: ") or itt_jitter)
-    logger.info(f"Final schedule: max_trial={max_trial}, lever_dur={lever_dur}, itt={itt_base} ± {itt_jitter}")
-    return max_trial, lever_dur, itt_base, itt_jitter
-
-# =========================
-# Session number helper
-# =========================
-def get_next_session_number(csv_path):
-    if not csv_path.exists():
-        return 1
-    
-    max_session = 0
-    try:
-        with open(csv_path, "r") as f:
-            reader = csv.reader(f)
-            # Skip the header row
-            next(reader, None) 
-            
-            for row in reader:
-                # Ensure row has enough columns and isn't metadata
-                if len(row) >= 3:
-                    session_str = row[2].strip()
-                    if session_str.isdigit():
-                        current_val = int(session_str)
-                        if current_val > max_session:
-                            max_session = current_val
-                            
-        return max_session + 1
-    except Exception as e:
-        logger.error(f"Error reading session number: {e}")
-        return 1
+        iti_base = float(input("Enter iti_base: ") or iti_base)
+        iti_jitter = float(input("Enter iti_jitter: ") or iti_jitter)
+        buffer_dur = float(input("Enter buffer_dur: ") or buffer_dur)
+    print(f"Final schedule: max_trial={max_trial}, lever_dur={lever_dur}, iti={iti_base} ± {iti_jitter}, buffer={buffer_dur}\n")
+    return max_trial, lever_dur, iti_base, iti_jitter, buffer_dur
 
 # =========================
 # Main run
 # =========================
 def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
+    max_trial, lever_dur, iti_base, iti_jitter, buffer_dur = configure_schedule()
 
-    # Load schedule
-    max_trial, lever_dur, itt_base, itt_jitter = configure_schedule()
+    # Log task parameters at time 0
+    log_event("Variable Event", "YOLO_Weights", weights)
+    log_event("Variable Event", "YOLO_Img_Size", img_size)
+    log_event("Variable Event", "YOLO_Conf_Thres", conf_thres)
+    log_event("Variable Event", "Task_Max_Trial", max_trial)
+    log_event("Variable Event", "Task_Lever_Dur", lever_dur)
+    log_event("Variable Event", "Task_ITI_Base", iti_base)
+    log_event("Variable Event", "Task_ITI_Jitter", iti_jitter)
+    log_event("Variable Event", "Task_Buffer_Dur", buffer_dur)
 
-    # New session control parameters
-    max_sessions_in_burst = 2      # max sessions in a row
-    burst_interval = 10            # seconds between consecutive sessions
-    cooldown_time = 300            # 5 min cooldown after burst
-
-    # =========================
     # State variables
-    # =========================
     recording = False
     out = None
     last_detection_time = 0
@@ -136,50 +105,42 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
 
     stgt_process = None
     stgt_started = False
+    session_number = 0
 
-    session_count_in_burst = 0
-    last_stgt_end_time = 0
-    cooldown_until = 0
-
-    last_blocked_log_time = 0
-    BLOCK_LOG_INTERVAL = 2  # sec
-    session_number = ""     # Initialized to ensure continuous scope
-
-    # New states for time-window buffer & hysteresis
+    # Presence & Wait Logic
     detection_window = deque(maxlen=30)
     is_present = False
-    last_verified_presence_time = 0
+    presence_timeout_start = 0  # Starts 30s countdown when monkey leaves
+    isb_until = 0               # Holds the 4 min wait (240s) for consecutive sessions
+    isb_active = False
 
     # CSI state
     csi_outs = [None] * len(csi_sources)
     csi_start_times = [None] * len(csi_sources)
     csi_filenames = [None] * len(csi_sources)
 
-    # Load YOLO
-    logger.info("Loading YOLO model")
+    print("[INFO] Loading YOLO model...")
     model = YOLO(weights)
 
-    # Open USB camera
     device = "/dev/video0"
-    logger.info(f"Using USB camera: {device}")
+    print(f"[INFO] Using USB camera: {device}")
     cap = cv2.VideoCapture(device, cv2.CAP_V4L2)
     if not cap.isOpened():
-        logger.error("Failed to open USB camera")
+        print("[ERROR] Failed to open USB camera")
+        log_event("Error Event", "USB_Camera", "Failed to open")
         return
 
     FRAME_WIDTH = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     FRAME_HEIGHT = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     time_deque = deque(maxlen=30)
 
-    # Recording directory and CSV
-    record_dir = Path("/home/capuchin/stgt_data/video_recordings")
-    record_dir.mkdir(exist_ok=True)
-    log_csv_path = record_dir / f"sessions_{execution_id}.csv"
-    csv_file = open(log_csv_path, "a", newline="")
-    csv_writer = csv.writer(csv_file)
-    csv_writer.writerow(["timestamp", "execution_id", "session_number", "status", "reason", "video"])
+    # Setup video log CSV
+    if not video_csv_path.exists():
+        with open(video_csv_path, "w", newline="") as f:
+            csv.writer(f).writerow(["timestamp", "execution_id", "session_number", "status", "reason", "video"])
 
-    logger.info("Starting detection loop")
+    print("[INFO] Starting detection loop...")
+    log_event("System Event", "Detection_Loop", "Started")
 
     try:
         while True:
@@ -193,125 +154,89 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
             estimated_fps = estimate_fps(time_deque)
 
             # =========================
-            # YOLO Detection & Time-Window Buffer
+            # YOLO & Presence Logic
             # =========================
             results = model(frame, imgsz=img_size, conf=conf_thres, iou=0.4, verbose=False)
             raw_detection = len(results[0].boxes) > 0
-            
-            # Add to rolling window buffer
             detection_window.append(1 if raw_detection else 0)
-            
-            # Calculate detection ratio over the last ~1 second
             detection_ratio = sum(detection_window) / len(detection_window) if len(detection_window) > 0 else 0
 
-            # Evaluate Hysteresis / Interaction Bout
             if detection_ratio >= 0.50:
-                is_present = True
-                last_verified_presence_time = current_time
-            elif is_present and (current_time - last_verified_presence_time > 3.0):
-                # If 3 continuous seconds pass without verified presence, bout ends
-                is_present = False
+                if not is_present:
+                    is_present = True
+                    log_event("Variable Event", "YOLO_Detection_Ratio", round(detection_ratio, 2))
+                    log_event("Variable Event", "Subject_Present_Flag", 1)
+                    log_event("Variable Event", "Face_Detection", 1)
+                    log_event("Variable Event", "Station_Active", 1)
+                presence_timeout_start = 0 
+                last_detection_time = current_time
+            else:
+                if is_present:
+                    if presence_timeout_start == 0:
+                        presence_timeout_start = current_time
+                        log_event("Variable Event", "YOLO_Detection_Ratio", round(detection_ratio, 2))
+                        log_event("Condition Event", "Presence_Timeout_Begin", 30000)
+                    elif current_time - presence_timeout_start >= 30.0:
+                        is_present = False
+                        log_event("Timer Event", "Presence_Timeout_Elapsed", 30000)
+                        log_event("Variable Event", "Subject_Present_Flag", 0)
+                        log_event("Variable Event", "Face_Detection", 0)
+                        log_event("Variable Event", "Station_Active", 0)
+                        log_event("Condition Event", "System_Ready_Next_Subject", "")
+                        isb_until = 0  # Reset ISB so next arrival triggers instantly
+                        isb_active = False
+                        presence_timeout_start = 0
 
             # =========================
-            # USB Recording (independent)
+            # USB Recording
             # =========================
-            if is_present:
-                last_detection_time = current_time
-                if not recording:
-                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    filename = f"capuchin_{timestamp}.mp4"
-                    out_path = record_dir / filename
-                    out = cv2.VideoWriter(
-                        str(out_path),
-                        cv2.VideoWriter_fourcc(*'mp4v'),
-                        estimated_fps,
-                        (FRAME_WIDTH, FRAME_HEIGHT)
-                    )
+            if is_present and not recording:
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                filename = f"capuchin_{timestamp}.mp4"
+                out_path = record_dir / filename
+                
+                try:
+                    out = cv2.VideoWriter(str(out_path), cv2.VideoWriter_fourcc(*'mp4v'), estimated_fps, (FRAME_WIDTH, FRAME_HEIGHT))
                     recording = True
-                    logger.info(f"Started USB recording: {filename}")
+                    log_event("Output Event", "USB_Camera_Recording_On", filename)
+                    print(f"[INFO] Started USB recording: {filename}")
+                except Exception as e:
+                    log_event("Error Event", "USB_Camera", f"Failed to write video: {e}")
 
             if recording and out:
                 out.write(frame)
 
-            if recording and (current_time - last_detection_time > 10):
-                recording_end_time = datetime.now().isoformat()
-                logger.info(f"Stopping USB recording: {filename}")
+            if recording and (current_time - last_detection_time > 10) and not is_present:
+                print(f"[INFO] Stopping USB recording: {filename}")
                 if out:
                     out.release()
                 recording = False
                 out = None
+                log_event("Output Event", "USB_Camera_Recording_Off", "")
                 filename = ""
 
             # =========================
-            # Detect STGT completion & stop CSI
+            # Inter-Session Break (ISB) Check
             # =========================
-            if stgt_started and stgt_process and stgt_process.poll() is not None:
-                logger.info("STGT finished, stopping CSI cameras")
-                for i, proc in enumerate(csi_outs):
-                    if proc:
-                        proc.send_signal(signal.SIGINT)
-                        proc.wait()
-                        csv_writer.writerow([
-                            datetime.now().isoformat(),
-                            execution_id,
-                            session_number, 
-                            "stopped",
-                            "",
-                            str(csi_filenames[i])
-                        ])
-                        csv_file.flush()
-                stgt_started = False
-                last_stgt_end_time = current_time
-                csi_outs = [None] * len(csi_sources)
-                csi_start_times = [None] * len(csi_sources)
-                csi_filenames = [None] * len(csi_sources)
-                
-                # Start cooldown timer ONLY AFTER the final session in a burst ends
-                if session_count_in_burst >= max_sessions_in_burst:
-                    cooldown_until = current_time + cooldown_time
-                    logger.info(f"Burst limit reached. Cooldown applied for {cooldown_time} seconds")
+            if isb_active and current_time >= isb_until:
+                log_event("Timer Event", "ISB_Timer_Elapsed", 240000)
+                isb_active = False
 
             # =========================
-            # Session state-trigger logic
+            # Trigger STGT Subprocess
             # =========================
-            session_allowed = True
-            reason = ""
-
-            # Check if cooldown has expired
-            if current_time >= cooldown_until and cooldown_until > 0:
-                session_count_in_burst = 0
-                cooldown_until = 0
-
-            if current_time < cooldown_until:
-                session_allowed = False
-                reason = "cooldown"
-            elif session_count_in_burst >= max_sessions_in_burst:
-                session_allowed = False
-                reason = "burst_limit"
-            elif not stgt_started and session_count_in_burst > 0 and (current_time - last_stgt_end_time < burst_interval):
-                # Enforce the 10-second wait interval between the 1st and 2nd session of a burst
-                session_allowed = False
-                reason = "burst_interval_wait"
-
-            if is_present and session_allowed and not stgt_started:
-                # Start new session
-                session_number = get_next_session_number(log_csv_path)
-                session_count_in_burst += 1
+            if is_present and not stgt_started and not isb_active:
+                session_number += 1
                 current_temp = get_cpu_temp()
+                
+                log_event("Diagnostic Event", "CPU_Temperature_Log", current_temp)
+                log_event("Condition Event", "STGT_Subprocess_Start", session_number)
+                log_event("Timer Event", "Session_Timer_Start", 0)
 
-                logger.info(f"Starting STGT session {session_number} | CPU Temp: {current_temp}°C")
+                with open(video_csv_path, "a", newline="") as f:
+                    csv.writer(f).writerow([datetime.now().isoformat(), execution_id, session_number, "started", "", filename if recording else ""])
 
-                csv_writer.writerow([
-                    datetime.now().isoformat(),
-                    execution_id,
-                    session_number,
-                    "started",
-                    "",
-                    filename if recording else ""
-                ])
-                csv_file.flush()
-
-                # Start STGT task
+                # Start Task Subprocess
                 stgt_process = subprocess.Popen([
                     "/usr/bin/python3",
                     "/home/capuchin/Desktop/stgt_scripts/stgt_task.py",
@@ -319,10 +244,14 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                     "--session_number", str(session_number),
                     "--max_trial", str(max_trial),
                     "--lever_dur", str(lever_dur),
-                    "--itt_base", str(itt_base),
-                    "--itt_jitter", str(itt_jitter)
+                    "--iti_base", str(iti_base),
+                    "--iti_jitter", str(iti_jitter),
+                    "--buffer_dur", str(buffer_dur),
+                    "--data_csv_path", str(data_csv_path),
+                    "--t0", str(T0)
                 ])
                 stgt_started = True
+                session_start_time = current_time
 
                 # Start CSI cameras
                 for i, cam_index in enumerate(csi_sources):
@@ -331,47 +260,53 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                     out_path_csi = record_dir / filename_csi
                     try:
                         proc = subprocess.Popen([
-                            "rpicam-vid",
-                            "-t", "0",
-                            "-n",
-                            "--inline",
-                            "--width", "640",
-                            "--height", "480",
-                            "--framerate", "15",
-                            "--camera", str(cam_index),
-                            "-o", str(out_path_csi)
+                            "rpicam-vid", "-t", "0", "-n", "--inline",
+                            "--width", "640", "--height", "480", "--framerate", "15",
+                            "--camera", str(cam_index), "-o", str(out_path_csi)
                         ])
                         csi_outs[i] = proc
-                        csi_start_times[i] = datetime.now().isoformat()
-                        csi_filenames[i] = out_path_csi
-                        logger.info(f"Started CSI camera {cam_index}: {filename_csi}")
+                        csi_filenames[i] = filename_csi
+                        log_event("Output Event", f"CSI_Camera_{i}_Recording_On", filename_csi)
+                        print(f"[INFO] Started CSI camera {cam_index}: {filename_csi}")
                     except Exception as e:
-                        logger.error(f"Failed to start CSI camera {cam_index}: {e}")
+                        print(f"[ERROR] Failed to start CSI camera {cam_index}: {e}")
+                        log_event("Error Event", f"CSI_Camera_{cam_index}", f"Failed to start: {e}")
                         csi_outs[i] = None
 
-            # Blocked session logging
-            elif is_present and not session_allowed:
-                if current_time - last_blocked_log_time > 2:
-                    csv_writer.writerow([
-                        datetime.now().isoformat(),
-                        execution_id,
-                        session_number,
-                        "blocked",
-                        reason,
-                        filename if recording else ""
-                    ])
-                    csv_file.flush()
-                    logger.info(f"Session blocked: {reason}")
-                    last_blocked_log_time = current_time
+            # =========================
+            # STGT Completion & Cleanup
+            # =========================
+            if stgt_started and stgt_process and stgt_process.poll() is not None:
+                session_duration = int((current_time - session_start_time) * 1000)
+                log_event("Timer Event", "Session_Timer_Elapsed", session_duration)
+                log_event("Condition Event", "STGT_Subprocess_End", "Complete")
+                
+                print("[INFO] STGT finished, stopping CSI cameras")
+                for i, proc in enumerate(csi_outs):
+                    if proc:
+                        proc.send_signal(signal.SIGINT)
+                        proc.wait()
+                        log_event("Output Event", f"CSI_Camera_{i}_Recording_Off", "")
+                        with open(video_csv_path, "a", newline="") as f:
+                            csv.writer(f).writerow([datetime.now().isoformat(), execution_id, session_number, "stopped", "", str(csi_filenames[i])])
+                
+                stgt_started = False
+                csi_outs = [None] * len(csi_sources)
+                
+                # Apply the 4-minute continuous presence wait (Inter-Session Break)
+                if is_present:
+                    isb_active = True
+                    isb_until = current_time + 240.0
+                    log_event("Condition Event", "Phase_Transition", "Inter_Session_Break")
+                    log_event("Timer Event", "ISB_Timer_Start", 240000)
 
             time.sleep(0.005)
 
     except KeyboardInterrupt:
-        logger.info("Interrupted by user")
-
+        print("\n[INFO] Interrupted by user")
+        log_event("System Event", "Execution", "Interrupted by user")
     finally:
-        if out:
-            out.release()
+        if out: out.release()
         cap.release()
         for proc in csi_outs:
             if proc:
@@ -380,13 +315,9 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
         if stgt_process:
             stgt_process.terminate()
             stgt_process.wait()
-        csv_file.close()
-        logger.info("All resources released")
+        print("[INFO] All resources released")
+        log_event("System Event", "Execution", "Resources released, system closed")
 
-
-# =========================
-# Argument parser
-# =========================
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--weights', type=str, default='best.pt')
@@ -395,9 +326,4 @@ if __name__ == "__main__":
     parser.add_argument('--csi', type=int, nargs='+', default=[])
     args = parser.parse_args()
 
-    run(
-        weights=args.weights,
-        img_size=args.img,
-        conf_thres=args.conf,
-        csi_sources=args.csi
-    )
+    run(weights=args.weights, img_size=args.img, conf_thres=args.conf, csi_sources=args.csi)
