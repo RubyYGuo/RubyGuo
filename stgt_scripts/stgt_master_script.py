@@ -69,7 +69,7 @@ def estimate_fps(time_deque):
 # =========================
 def configure_schedule():
     print("\n========== STGT SCHEDULE CONFIG ==========")
-    max_trial, lever_dur, iti_base, iti_jitter, buffer_dur = 5, 2, 2, 1, 5
+    max_trial, lever_dur, iti_base, iti_jitter, buffer_dur = 12, 4, 18, 6, 5
     print(f"Current settings: max_trial={max_trial}, lever_dur={lever_dur}, iti={iti_base} ± {iti_jitter}, buffer={buffer_dur}")
     choice = input("\nModify settings? (y/n): ").strip().lower()
     if choice == "y":
