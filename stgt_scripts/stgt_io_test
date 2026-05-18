@@ -154,8 +154,16 @@ def test_csi_cameras():
             "--camera", "1", "-o", tmp_output1
         ])
         
-        proc0.wait()
-        proc1.wait()
+        # Use a strict timeout with a 3-second buffer for hardware warmup
+        timeout_limit = cam_dur + 3.0
+        
+        for proc, cam_name in [(proc0, "CSI 0"), (proc1, "CSI 1")]:
+            try:
+                proc.wait(timeout=timeout_limit)
+            except subprocess.TimeoutExpired:
+                print(f"{datetime.now().isoformat()} WARNING: {cam_name} hung (likely hardware/connection failure). Force terminating...")
+                proc.kill()  # Use kill() instead of terminate() to force close frozen drivers
+                proc.wait()
         
         for tmp_file in [tmp_output0, tmp_output1]:
             if os.path.exists(tmp_file):
