@@ -3,7 +3,9 @@
 import sys
 import time
 import csv
+import logging
 from datetime import datetime
+from pathlib import Path
 import RPi.GPIO as GPIO
 import random
 import argparse
@@ -14,10 +16,10 @@ import argparse
 parser = argparse.ArgumentParser()
 parser.add_argument("--execution_id", type=str)
 parser.add_argument("--session_number", type=int, default=1)
-parser.add_argument("--max_trial", type=int, default=5)
-parser.add_argument("--lever_dur", type=float, default=2.0)
-parser.add_argument("--iti_base", type=float, default=2.0)
-parser.add_argument("--iti_jitter", type=float, default=1.0)
+parser.add_argument("--max_trial", type=int, default=12)
+parser.add_argument("--lever_dur", type=float, default=4.0)
+parser.add_argument("--iti_base", type=float, default=18.0)
+parser.add_argument("--iti_jitter", type=float, default=6.0)
 parser.add_argument("--buffer_dur", type=float, default=5.0)
 parser.add_argument("--data_csv_path", type=str, required=True)
 parser.add_argument("--t0", type=float, required=True)
@@ -34,15 +36,29 @@ data_csv_path = args.data_csv_path
 t0 = args.t0
 
 # =========================
+# Logging Setup
+# =========================
+log_file_path = Path("/home/capuchin/stgt_data/task_data") / f"task_log_{execution_id}.txt"
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] Subprocess - %(message)s",
+    handlers=[
+        logging.FileHandler(log_file_path),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# =========================
 # Data Logging Helper
 # =========================
 def log_event(ev_name, item_name, value=""):
-    ms = int((time.time() - t0) * 1000)
+    sec = time.time() - t0
     try:
         with open(data_csv_path, "a", newline="") as f:
-            csv.writer(f).writerow([ms, ev_name, item_name, value])
+            csv.writer(f).writerow([f"{sec:.3f}", ev_name, item_name, value])
     except Exception as e:
-        print(f"[ERROR] Failed to write to CSV: {e}")
+        logger.error(f"Failed to write to CSV: {e}")
 
 # =========================
 # GPIO PINS & SETUP
@@ -58,7 +74,7 @@ try:
     GPIO.setup(relay_lv_out, GPIO.OUT)
     GPIO.setup(relay_cue_light, GPIO.OUT)
     GPIO.setup(relay_dispenser, GPIO.OUT)
-    # Using BOTH to capture Tray On and Off
+    # Using BOTH to capture Foodcup On and Off
     GPIO.setup(lv_press_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
     GPIO.setup(foodcup_beam_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 
@@ -66,7 +82,7 @@ try:
     GPIO.output(relay_dispenser, True)
     GPIO.output(relay_cue_light, True)
 except Exception as e:
-    print(f"[ERROR] GPIO setup failed: {e}")
+    logger.error(f"GPIO setup failed: {e}")
     log_event("Error Event", "GPIO_Setup", f"Failed: {e}")
     sys.exit(1)
 
@@ -84,15 +100,19 @@ def foodcup_callback(channel):
     
     if state == GPIO.LOW:  # Beam Broken
         log_event("Input Event", "Foodcup_Entry_On")
+        logger.info("Foodcup beam broken (Entry)")
+    else:  # Beam Restored
+        log_event("Input Event", "Foodcup_Entry_Off")
         log_event("Condition Event", "Foodcup_Activate")
+        
         if phase == "lever":
             session_foodcup_cs_entries += 1
             log_event("Variable Event", "Session_Foodcup_CS_Entries", session_foodcup_cs_entries)
+            logger.info(f"Foodcup entry completed (CS Phase). Total: {session_foodcup_cs_entries}")
         elif phase == "iti":
             session_foodcup_iti_entries += 1
             log_event("Variable Event", "Session_Foodcup_ITI_Entries", session_foodcup_iti_entries)
-    else:  # Beam Restored
-        log_event("Input Event", "Foodcup_Entry_Off")
+            logger.info(f"Foodcup entry completed (ITI Phase). Total: {session_foodcup_iti_entries}")
 
 GPIO.add_event_detect(foodcup_beam_pin, GPIO.BOTH, callback=foodcup_callback, bouncetime=100)
 
@@ -100,7 +120,7 @@ GPIO.add_event_detect(foodcup_beam_pin, GPIO.BOTH, callback=foodcup_callback, bo
 # MAIN SESSION LOGIC
 # =========================
 try:
-    print(f"[INFO] STGT Subprocess {session_number} Initialized")
+    logger.info(f"STGT Subprocess {session_number} Initialized")
     
     # Session Resets
     log_event("Variable Event", "Session_Counter", session_number)
@@ -114,12 +134,13 @@ try:
     phase = "buffer"
     log_event("Variable Event", "Task_Phase_State", "buffer")
     
-    print(f"[{datetime.now().isoformat()}] Buffer started ({buffer_dur}s)")
+    logger.info(f"Buffer phase started ({buffer_dur}s)")
     time.sleep(buffer_dur)
-    log_event("Timer Event", "Buffer_Timer", int(buffer_dur * 1000))
+    log_event("Timer Event", "Buffer_Timer", round(buffer_dur, 3))
 
     # ----- TRIAL LOOP -----
     for trial_n in range(max_trial):
+        logger.info(f"Starting Trial {trial_n + 1}")
         log_event("Condition Event", "Phase_Transition", "Trial_Start")
         log_event("Variable Event", "Trial_Counter", trial_n + 1)
         
@@ -135,6 +156,7 @@ try:
         GPIO.output(relay_cue_light, False)
         log_event("Output Event", "Lever_Extend_On")
         log_event("Output Event", "Cue_Light_On")
+        logger.info("Lever extended, Cue Light on")
         
         start_time = time.time()
         last_state = GPIO.input(lv_press_pin)
@@ -144,17 +166,19 @@ try:
             current_state = GPIO.input(lv_press_pin)
             if last_state == GPIO.HIGH and current_state == GPIO.LOW:
                 log_event("Input Event", "Lever_Press_On")
+                logger.info("Lever pressed down")
+            elif last_state == GPIO.LOW and current_state == GPIO.HIGH:
+                # Count logic is now triggered upon release (Off transition)
+                log_event("Input Event", "Lever_Press_Off")
                 log_event("Condition Event", "Lever_Activate")
                 session_lever_counts += 1
                 log_event("Variable Event", "Session_Lever_Counts", session_lever_counts)
-                print(f"[{datetime.now().isoformat()}] lever pressed")
-            elif last_state == GPIO.LOW and current_state == GPIO.HIGH:
-                log_event("Input Event", "Lever_Press_Off")
+                logger.info(f"Lever released and counted. Total: {session_lever_counts}")
             
             last_state = current_state
             time.sleep(0.01) 
 
-        log_event("Timer Event", "CS_Timer", int(lever_dur * 1000))
+        log_event("Timer Event", "CS_Timer", round(lever_dur, 3))
 
         # ----- REWARD PHASE -----
         log_event("Condition Event", "Phase_Transition", "Reward_Dispense")
@@ -169,26 +193,26 @@ try:
         log_event("Pulse Output Event", "Dispenser", 0.01)
         time.sleep(0.01)
         GPIO.output(relay_dispenser, True)
-        print(f"[{datetime.now().isoformat()}] dispensing reward")
+        logger.info("Dispensing reward (Dispenser pulsed)")
 
         # ----- ITI PHASE -----
         log_event("Condition Event", "Phase_Transition", "ITI_Active")
         phase = "iti"
         log_event("Variable Event", "Task_Phase_State", "iti")
         
-        print(f"[{datetime.now().isoformat()}] ITI started: {trial_iti:.2f}s")
+        logger.info(f"ITI phase started. Scheduled duration: {trial_iti:.2f}s")
         time.sleep(trial_iti)
-        log_event("Timer Event", "ITI_Timer", int(trial_iti * 1000))
+        log_event("Timer Event", "ITI_Timer", round(trial_iti, 3))
         
-        print(f"[{datetime.now().isoformat()}] Trial {trial_n + 1} completed")
+        logger.info(f"Trial {trial_n + 1} completed")
 
     log_event("Condition Event", "Session_End", "Complete")
 
 except KeyboardInterrupt:
-    print("\n[INFO] STGT session interrupted")
+    logger.info("STGT subprocess interrupted by user")
     log_event("System Event", "Task_Subprocess", "Interrupted by user")
 finally:
     phase = "idle"
     log_event("Variable Event", "Task_Phase_State", "idle")
     GPIO.cleanup()
-    print("[INFO] Subprocess complete, GPIO cleaned up")
+    logger.info("Subprocess complete, GPIO cleaned up")
