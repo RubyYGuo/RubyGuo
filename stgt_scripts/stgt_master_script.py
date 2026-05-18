@@ -168,7 +168,12 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                     log_event("Variable Event", "Subject_Present_Flag", 1)
                     log_event("Variable Event", "Face_Detection", 1)
                     log_event("Variable Event", "Station_Active", 1)
-                presence_timeout_start = 0 
+                
+                # Monkey returned before the 30 seconds elapsed
+                if presence_timeout_start != 0:
+                    log_event("Condition Event", "Presence_Timeout_Cancelled", "Subject Returned")
+                    presence_timeout_start = 0 
+                
                 last_detection_time = current_time
             else:
                 if is_present:
@@ -182,9 +187,14 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                         log_event("Variable Event", "Subject_Present_Flag", 0)
                         log_event("Variable Event", "Face_Detection", 0)
                         log_event("Variable Event", "Station_Active", 0)
+                        
+                        # STATE OVERRIDE: Subject officially left, cancel the 4-min break if it was running
+                        if isb_active:
+                            log_event("Condition Event", "ISB_Timer_Aborted", "Subject Departed")
+                            isb_active = False
+                            isb_until = 0
+
                         log_event("Condition Event", "System_Ready_Next_Subject", "")
-                        isb_until = 0  # Reset ISB so next arrival triggers instantly
-                        isb_active = False
                         presence_timeout_start = 0
 
             # =========================
