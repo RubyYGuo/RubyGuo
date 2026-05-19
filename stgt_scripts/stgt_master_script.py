@@ -112,39 +112,26 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
     log_event("Variable Event", "Task_ITI_Jitter", iti_jitter)
     log_event("Variable Event", "Task_Buffer_Dur", buffer_dur)
 
-    # State variables
+    # PROCESS A: USB Recording State
     recording = False
     out = None
-    last_detection_time = 0
     filename = ""
+    usb_last_seen = 0.0
 
+    # PROCESS B: Session & Timeout State
     stgt_process = None
     stgt_started = False
     session_number = 0
-
-    # Presence & Wait Logic
-    detection_window = deque(maxlen=30)
-    
-    # -------------------------
-    # RAW YOLO VISIBILITY STATE
-    # -------------------------
-    # Used ONLY for USB recording
-    subject_visible = False
-    last_usb_detection_time = 0
-    
-    # -------------------------
-    # OFFICIAL SESSION STATE
-    # -------------------------
-    # Used ONLY for session logic / ISB
-    is_present = False
-    presence_timeout_start = 0
-    isb_until = 0
+    session_subject_present = False
     isb_active = False
+    isb_until = 0.0
+    presence_timeout_start = 0.0  
 
     # CSI state
     csi_outs = [None] * len(csi_sources)
     csi_start_times = [None] * len(csi_sources)
     csi_filenames = [None] * len(csi_sources)
+    detection_window = deque(maxlen=30)
 
     logger.info("Loading YOLO model...")
     model = YOLO(weights)
@@ -180,209 +167,63 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
             time_deque.append(current_time)
             estimated_fps = estimate_fps(time_deque)
 
-            # =========================
-            # YOLO DETECTION
-            # =========================
+            # ==========================================
+            # GLOBAL YOLO DETECTION (Runs Every Frame)
+            # ==========================================
             results = model(frame, imgsz=img_size, conf=conf_thres, iou=0.4, verbose=False)
-            
             raw_detection = len(results[0].boxes) > 0
-            
             detection_window.append(1 if raw_detection else 0)
+            ratio = sum(detection_window) / len(detection_window) if len(detection_window) > 0 else 0
             
-            detection_ratio = (
-                sum(detection_window) / len(detection_window)
-                if len(detection_window) > 0 else 0
-            )
-            
-            # -----------------------------------
-            # RAW VISIBILITY STATE (ALWAYS ACTIVE)
-            # -----------------------------------
-            subject_visible = detection_ratio >= 0.50
-            
-            # Used ONLY for USB recording logic
-            if subject_visible:
-                last_usb_detection_time = current_time
-            
-            # ===================================
-            # OFFICIAL SESSION PRESENCE STATE
-            # ===================================
-            # IMPORTANT:
-            # This logic is PAUSED during active STGT sessions.
-            # Session continues uninterrupted once started.
-            # ===================================
-            if not stgt_started:
-            
-                if subject_visible:
-            
-                    if not is_present:
-                        is_present = True
-            
-                        log_event(
-                            "Variable Event",
-                            "YOLO_Detection_Ratio",
-                            round(detection_ratio, 2)
-                        )
-            
-                        log_event(
-                            "Variable Event",
-                            "Subject_Present_Flag",
-                            1
-                        )
-            
-                        log_event(
-                            "Variable Event",
-                            "Face_Detection",
-                            1
-                        )
-            
-                        log_event(
-                            "Variable Event",
-                            "Station_Active",
-                            1
-                        )
-            
-                    # Subject returned before timeout elapsed
-                    if presence_timeout_start != 0:
-            
-                        logger.info(
-                            "Subject returned before timeout elapsed. "
-                            "Cancelling timeout."
-                        )
-            
-                        log_event(
-                            "Condition Event",
-                            "Presence_Timeout_Cancelled",
-                            "Subject Returned"
-                        )
-            
-                        presence_timeout_start = 0
-            
-                else:
-            
-                    if is_present:
-            
-                        if presence_timeout_start == 0:
-            
-                            presence_timeout_start = current_time
-            
-                            log_event(
-                                "Variable Event",
-                                "YOLO_Detection_Ratio",
-                                round(detection_ratio, 2)
-                            )
-            
-                            log_event(
-                                "Condition Event",
-                                "Presence_Timeout_Begin",
-                                30.0
-                            )
-            
-                        elif current_time - presence_timeout_start >= 30.0:
-            
-                            is_present = False
-            
-                            logger.info(
-                                "Subject departed. "
-                                "30-second presence timeout elapsed."
-                            )
-            
-                            log_event(
-                                "Timer Event",
-                                "Presence_Timeout_Elapsed",
-                                30.0
-                            )
-            
-                            log_event(
-                                "Variable Event",
-                                "Subject_Present_Flag",
-                                0
-                            )
-            
-                            log_event(
-                                "Variable Event",
-                                "Face_Detection",
-                                0
-                            )
-            
-                            log_event(
-                                "Variable Event",
-                                "Station_Active",
-                                0
-                            )
-            
-                            # Abort ISB if subject truly left
-                            if isb_active:
-            
-                                logger.info(
-                                    "Aborting Inter-Session Break "
-                                    "due to departure."
-                                )
-            
-                                log_event(
-                                    "Condition Event",
-                                    "ISB_Timer_Aborted",
-                                    "Subject Departed"
-                                )
-            
-                                isb_active = False
-                                isb_until = 0
-            
-                            log_event(
-                                "Condition Event",
-                                "System_Ready_Next_Subject",
-                                ""
-                            )
-            
-                            presence_timeout_start = 0
+            instant_presence = (ratio >= 0.50)
 
-            # =========================
-            # USB Recording
-            # =========================
-            # Fully independent from session logic
-            # Controlled ONLY by raw YOLO visibility
-            # =========================
-            if subject_visible and not recording:
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                filename = f"capuchin_{timestamp}.mp4"
-                out_path = record_dir / filename
+            # Log official session arrival
+            if instant_presence and not session_subject_present:
+                session_subject_present = True
+                log_event("Variable Event", "YOLO_Detection_Ratio", round(ratio, 2))
+                log_event("Variable Event", "Subject_Present_Flag", 1)
+                log_event("Variable Event", "Face_Detection", 1)
+                log_event("Variable Event", "Station_Active", 1)
+
+
+            # ==========================================
+            # PROCESS A: INDEPENDENT USB RECORDING
+            # ==========================================
+            if instant_presence:
+                usb_last_seen = current_time
+                if not recording:
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    filename = f"capuchin_{timestamp}.mp4"
+                    out_path = record_dir / filename
+                    try:
+                        out = cv2.VideoWriter(str(out_path), cv2.VideoWriter_fourcc(*'mp4v'), estimated_fps, (FRAME_WIDTH, FRAME_HEIGHT))
+                        recording = True
+                        log_event("Output Event", "USB_Camera_Recording_On", filename)
+                        logger.info(f"Started USB recording: {filename}")
+                    except Exception as e:
+                        logger.error(f"Failed to start USB recording: {e}")
+                        log_event("Error Event", "USB_Camera", f"Failed to write video: {e}")
+
+            if recording:
+                if out: out.write(frame)
                 
-                try:
-                    out = cv2.VideoWriter(str(out_path), cv2.VideoWriter_fourcc(*'mp4v'), estimated_fps, (FRAME_WIDTH, FRAME_HEIGHT))
-                    recording = True
-                    log_event("Output Event", "USB_Camera_Recording_On", filename)
-                    logger.info(f"Started USB recording: {filename}")
-                except Exception as e:
-                    logger.error(f"Failed to start USB recording: {e}")
-                    log_event("Error Event", "USB_Camera", f"Failed to write video: {e}")
+                # Strict 10-second absence stops the video immediately
+                if not instant_presence and (current_time - usb_last_seen > 10.0):
+                    logger.info(f"Stopping USB recording: {filename}")
+                    if out: out.release()
+                    recording = False
+                    out = None
+                    log_event("Output Event", "USB_Camera_Recording_Off", "")
+                    filename = ""
 
-            if recording and out:
-                out.write(frame)
 
-            if recording and (current_time - last_usb_detection_time > 10):
-                logger.info(f"Stopping USB recording: {filename}")
-                if out:
-                    out.release()
-                recording = False
-                out = None
-                log_event("Output Event", "USB_Camera_Recording_Off", "")
-                filename = ""
-
-            # =========================
-            # Inter-Session Break (ISB) Check
-            # =========================
-            if isb_active and current_time >= isb_until:
-                logger.info("Inter-Session Break elapsed. Ready for next session.")
-                log_event("Timer Event", "ISB_Timer_Elapsed", 240.0)
-                isb_active = False
-
-            # =========================
-            # Trigger STGT Subprocess
-            # =========================
-            if is_present and not stgt_started and not isb_active:
+            # ==========================================
+            # PROCESS B: SESSION & CSI TRIGGER LOGIC
+            # ==========================================
+            if instant_presence and not stgt_started and not isb_active:
                 session_number += 1
                 current_temp = get_cpu_temp()
                 
-                logger.info(f"Triggering STGT Subprocess. Session {session_number}. CPU Temp: {current_temp}°C")
                 log_event("Diagnostic Event", "CPU_Temperature_Log", current_temp)
                 log_event("Condition Event", "STGT_Subprocess_Start", session_number)
                 log_event("Timer Event", "Session_Timer_Start", 0.0)
@@ -427,9 +268,10 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                         log_event("Error Event", f"CSI_Camera_{cam_index}", f"Failed to start: {e}")
                         csi_outs[i] = None
 
-            # =========================
-            # STGT Completion & Cleanup
-            # =========================
+
+            # ==========================================
+            # SESSION COMPLETION & ISB INITIATION
+            # ==========================================
             if stgt_started and stgt_process and stgt_process.poll() is not None:
                 session_duration = round(current_time - session_start_time, 3)
                 log_event("Timer Event", "Session_Timer_Elapsed", session_duration)
@@ -447,19 +289,51 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                 stgt_started = False
                 csi_outs = [None] * len(csi_sources)
                 
-                # Apply the 4-minute continuous presence wait (Inter-Session Break)
-                # -----------------------------------
-                # Resync official presence state
-                # after session ends
-                # -----------------------------------
-                is_present = subject_visible
-                
-                if is_present:
-                    logger.info("Subject still present. Starting 4-minute Inter-Session Break.")
-                    isb_active = True
-                    isb_until = current_time + 240.0
-                    log_event("Condition Event", "Phase_Transition", "Inter_Session_Break")
-                    log_event("Timer Event", "ISB_Timer_Start", 240.0)
+                # ALWAYS start ISB when a session concludes
+                logger.info("Session complete. Starting 4-minute Inter-Session Break.")
+                isb_active = True
+                isb_until = current_time + 240.0
+                presence_timeout_start = 0  # Clean slate for timeout monitoring
+                log_event("Condition Event", "Phase_Transition", "Inter_Session_Break")
+                log_event("Timer Event", "ISB_Timer_Start", 240.0)
+
+
+            # ==========================================
+            # ISB 30-SECOND DEPARTURE TRACKING
+            # ==========================================
+            if isb_active:
+                if instant_presence:
+                    if presence_timeout_start != 0:
+                        logger.info("Subject returned before timeout elapsed. Cancelling timeout.")
+                        log_event("Condition Event", "Presence_Timeout_Cancelled", "Subject Returned")
+                        presence_timeout_start = 0 
+                else:
+                    if presence_timeout_start == 0:
+                        presence_timeout_start = current_time
+                        log_event("Variable Event", "YOLO_Detection_Ratio", round(ratio, 2))
+                        log_event("Condition Event", "Presence_Timeout_Begin", 30.0)
+                    elif current_time - presence_timeout_start >= 30.0:
+                        logger.info("Subject departed. 30-second presence timeout elapsed.")
+                        log_event("Timer Event", "Presence_Timeout_Elapsed", 30.0)
+                        log_event("Variable Event", "Subject_Present_Flag", 0)
+                        log_event("Variable Event", "Face_Detection", 0)
+                        log_event("Variable Event", "Station_Active", 0)
+                        
+                        logger.info("Aborting Inter-Session Break due to departure.")
+                        log_event("Condition Event", "ISB_Timer_Aborted", "Subject Departed")
+                        log_event("Condition Event", "System_Ready_Next_Subject", "")
+                        
+                        # Full state reset for next monkey
+                        isb_active = False
+                        isb_until = 0
+                        presence_timeout_start = 0
+                        session_subject_present = False
+
+                # Check for natural expiration of the 4-minute wait
+                if isb_active and current_time >= isb_until:
+                    logger.info("Inter-Session Break elapsed. Ready for next session.")
+                    log_event("Timer Event", "ISB_Timer_Elapsed", 240.0)
+                    isb_active = False
 
             time.sleep(0.005)
 
