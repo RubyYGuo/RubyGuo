@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+import os
+import glob
 import torch
 import cv2
 import argparse
@@ -136,9 +138,18 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
     logger.info("Loading YOLO model...")
     model = YOLO(weights)
 
-    device = "/dev/video0"
-    logger.info(f"Using USB camera: {device}")
-    cap = cv2.VideoCapture(device, cv2.CAP_V4L2)
+    # Open USB camera dynamically
+    usb_cams = glob.glob("/dev/v4l/by-id/usb-*-video-index0")
+    if not usb_cams:
+        logger.error("Failed to find any USB camera connected via /dev/v4l/by-id/")
+        log_event("Error Event", "USB_Camera", "Failed to find device path")
+        return
+        
+    device = usb_cams[0]
+    real_device = os.path.realpath(device)
+    
+    logger.info(f"Using USB camera: {real_device} (from {device})")
+    cap = cv2.VideoCapture(real_device, cv2.CAP_V4L2)
     if not cap.isOpened():
         logger.error("Failed to open USB camera")
         log_event("Error Event", "USB_Camera", "Failed to open")
