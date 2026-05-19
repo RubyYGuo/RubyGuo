@@ -4,6 +4,7 @@ import os
 import time
 import subprocess
 import RPi.GPIO as GPIO
+import readline
 from datetime import datetime
 
 # =========================
@@ -16,14 +17,44 @@ relay_mgz = 22
 mgz_beam_pin = 21
 
 # =========================
+# HELPER FUNCTIONS
+# =========================
+def get_duration(prompt, default_val=5.0):
+    """
+    Pre-fills the input prompt with a default value.
+    The user can press Enter to accept or use Backspace to change it.
+    """
+    readline.set_startup_hook(lambda: readline.insert_text(str(default_val)))
+    try:
+        user_input = input(prompt)
+        val = float(user_input)
+    except ValueError:
+        val = float(default_val)
+        print(f"{datetime.now().isoformat()} Invalid input, defaulting to {default_val} seconds.")
+    finally:
+        readline.set_startup_hook(None)  # Reset the hook for future inputs
+    return val
+
+def get_integer(prompt, default_val=3):
+    """
+    Pre-fills the input prompt with a default integer value.
+    """
+    readline.set_startup_hook(lambda: readline.insert_text(str(default_val)))
+    try:
+        user_input = input(prompt)
+        val = int(user_input)
+    except ValueError:
+        val = int(default_val)
+        print(f"{datetime.now().isoformat()} Invalid input, defaulting to {default_val}.")
+    finally:
+        readline.set_startup_hook(None)
+    return val
+
+# =========================
 # TEST FUNCTIONS
 # =========================
 def test_lever():
-    try:
-        lv_dur = float(input("\nEnter duration to extend the lever (seconds): "))
-    except ValueError:
-        lv_dur = 5.0
-        print(f"{datetime.now().isoformat()} Invalid input, defaulting to 5.0 seconds.")
+    lv_dur = get_duration("\nEnter duration to extend the lever (seconds): ", 3.0)
         
     print(f"{datetime.now().isoformat()} Extending lever for {lv_dur} seconds. Please press the lever...")
     GPIO.output(relay_lv_out, False)
@@ -45,11 +76,7 @@ def test_lever():
 
 
 def test_cue_light():
-    try:
-        cue_dur = float(input("\nEnter duration to turn on the cue light (seconds): "))
-    except ValueError:
-        cue_dur = 5.0
-        print(f"{datetime.now().isoformat()} Invalid input, defaulting to 5.0 seconds.")
+    cue_dur = get_duration("\nEnter duration to turn on the cue light (seconds): ", 1.0)
         
     print(f"{datetime.now().isoformat()} Turning on cue light for {cue_dur} seconds...")
     GPIO.output(relay_cue_light, False)
@@ -59,9 +86,10 @@ def test_cue_light():
 
 
 def test_magazine():
-    print(f"\n{datetime.now().isoformat()} Starting magazine relay test. You will need to press Enter 3 times.")
-    for i in range(3):
-        input(f"Test {i + 1}/3: Press Enter to turn on relay_mgz for 0.01s...")
+    dispense_count = get_integer("\nEnter number of times to test the magazine relay: ", 3)
+    print(f"\n{datetime.now().isoformat()} Starting magazine relay test. You will need to press Enter {dispense_count} times.")
+    for i in range(dispense_count):
+        input(f"Test {i + 1}/{dispense_count}: Press Enter to turn on relay_mgz for 0.01s...")
         GPIO.output(relay_mgz, False)
         time.sleep(0.01)
         GPIO.output(relay_mgz, True)
@@ -69,11 +97,7 @@ def test_magazine():
 
 
 def test_beam():
-    try:
-        beam_dur = float(input("\nEnter duration to test the beam break (seconds): "))
-    except ValueError:
-        beam_dur = 5.0
-        print(f"{datetime.now().isoformat()} Invalid input, defaulting to 5.0 seconds.")
+    beam_dur = get_duration("\nEnter duration to test the beam break (seconds): ", 5.0)
         
     print(f"{datetime.now().isoformat()} Testing beam break for {beam_dur} seconds. Please trigger the beam...")
     
@@ -90,11 +114,7 @@ def test_beam():
 
 
 def test_usb_camera():
-    try:
-        cam_dur = float(input("\nEnter duration to show USB camera preview (seconds): "))
-    except ValueError:
-        cam_dur = 5.0
-        print(f"{datetime.now().isoformat()} Invalid input, defaulting to 5.0 seconds.")
+    cam_dur = get_duration("\nEnter duration to show USB camera preview (seconds): ", 5.0)
 
     print(f"\n{datetime.now().isoformat()} Testing USB camera...")
     usb_device_symlink = "/dev/video0"
@@ -127,11 +147,7 @@ def test_usb_camera():
 
 
 def test_csi_cameras():
-    try:
-        cam_dur = float(input("\nEnter duration to show CSI cameras preview (seconds): "))
-    except ValueError:
-        cam_dur = 5.0
-        print(f"{datetime.now().isoformat()} Invalid input, defaulting to 5.0 seconds.")
+    cam_dur = get_duration("\nEnter duration to show CSI cameras preview (seconds): ", 5.0)
 
     print(f"\n{datetime.now().isoformat()} Testing CSI cameras 0 and 1 side-by-side for {cam_dur} seconds...")
     try:
