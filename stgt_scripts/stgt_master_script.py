@@ -25,11 +25,11 @@ T0 = time.time()  # Master Baseline Time
 stgt_data_dir = Path("/home/capuchin/stgt_data/task_data")
 stgt_data_dir.mkdir(parents=True, exist_ok=True)
 
-# Restore Logging (Terminal + File)
-log_file_path = stgt_data_dir / f"master_log_{execution_id}.txt"
+# Unified Logging (Terminal + File)
+log_file_path = stgt_data_dir / f"system_log_{execution_id}.txt"
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
+    format="%(asctime)s [%(levelname)s] Master - %(message)s",
     handlers=[
         logging.FileHandler(log_file_path),
         logging.StreamHandler(sys.stdout)
@@ -159,10 +159,10 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
     FRAME_HEIGHT = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     time_deque = deque(maxlen=30)
 
-    # Setup video log CSV
+    # Setup Corrected Video Log CSV
     if not video_csv_path.exists():
         with open(video_csv_path, "w", newline="") as f:
-            csv.writer(f).writerow(["timestamp", "execution_id", "session_number", "status", "reason", "video"])
+            csv.writer(f).writerow(["timestamp", "execution_id", "session_number", "camera", "status", "video_filename"])
 
     logger.info("Starting detection loop...")
     log_event("System Event", "Detection_Loop", "Started")
@@ -211,6 +211,11 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                         recording = True
                         log_event("Output Event", "USB_Camera_Recording_On", filename)
                         logger.info(f"Started USB recording: {filename}")
+                        
+                        # Corrected unified camera log
+                        with open(video_csv_path, "a", newline="") as f:
+                            csv.writer(f).writerow([datetime.now().isoformat(), execution_id, session_number, "USB", "started", filename])
+                            
                     except Exception as e:
                         logger.error(f"Failed to start USB recording: {e}")
                         log_event("Error Event", "USB_Camera", f"Failed to write video: {e}")
@@ -225,6 +230,9 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                     recording = False
                     out = None
                     log_event("Output Event", "USB_Camera_Recording_Off", "")
+                    
+                    with open(video_csv_path, "a", newline="") as f:
+                        csv.writer(f).writerow([datetime.now().isoformat(), execution_id, session_number, "USB", "stopped", filename])
                     filename = ""
 
 
@@ -238,9 +246,6 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                 log_event("Diagnostic Event", "CPU_Temperature_Log", current_temp)
                 log_event("Condition Event", "STGT_Subprocess_Start", session_number)
                 log_event("Timer Event", "Session_Timer_Start", 0.0)
-
-                with open(video_csv_path, "a", newline="") as f:
-                    csv.writer(f).writerow([datetime.now().isoformat(), execution_id, session_number, "started", "", filename if recording else ""])
 
                 # Start Task Subprocess
                 stgt_process = subprocess.Popen([
@@ -274,6 +279,11 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                         csi_filenames[i] = filename_csi
                         log_event("Output Event", f"CSI_Camera_{i}_Recording_On", filename_csi)
                         logger.info(f"Started CSI camera {cam_index}: {filename_csi}")
+                        
+                        # Corrected unified camera log
+                        with open(video_csv_path, "a", newline="") as f:
+                            csv.writer(f).writerow([datetime.now().isoformat(), execution_id, session_number, f"CSI_{cam_index}", "started", filename_csi])
+                            
                     except Exception as e:
                         logger.error(f"Failed to start CSI camera {cam_index}: {e}")
                         log_event("Error Event", f"CSI_Camera_{cam_index}", f"Failed to start: {e}")
@@ -294,8 +304,9 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                         proc.send_signal(signal.SIGINT)
                         proc.wait()
                         log_event("Output Event", f"CSI_Camera_{i}_Recording_Off", "")
+                        
                         with open(video_csv_path, "a", newline="") as f:
-                            csv.writer(f).writerow([datetime.now().isoformat(), execution_id, session_number, "stopped", "", str(csi_filenames[i])])
+                            csv.writer(f).writerow([datetime.now().isoformat(), execution_id, session_number, f"CSI_{csi_sources[i]}", "stopped", str(csi_filenames[i])])
                 
                 stgt_started = False
                 csi_outs = [None] * len(csi_sources)
