@@ -5,6 +5,7 @@ import time
 import subprocess
 import RPi.GPIO as GPIO
 import readline
+import glob
 from datetime import datetime
 
 # =========================
@@ -117,33 +118,39 @@ def test_usb_camera():
     cam_dur = get_duration("\nEnter duration to show USB camera preview (seconds): ", 5.0)
 
     print(f"\n{datetime.now().isoformat()} Testing USB camera...")
-    usb_device_symlink = "/dev/video0"
     
-    if os.path.exists(usb_device_symlink):
-        real_usb_device = os.path.realpath(usb_device_symlink)
+    # Dynamically search for any USB camera's primary video feed
+    usb_cams = glob.glob("/dev/v4l/by-id/usb-*-video-index0")
+    
+    if not usb_cams:
+        print(f"{datetime.now().isoformat()} Error: No USB camera found connected to the system.")
+        return
+        
+    usb_device_symlink = usb_cams[0]
+    print(f"{datetime.now().isoformat()} Found USB camera at: {usb_device_symlink}")
+    
+    real_usb_device = os.path.realpath(usb_device_symlink)
+    
+    try:
+        proc_usb = subprocess.Popen([
+            "ffplay", 
+            "-f", "v4l2", 
+            "-framerate", "15", 
+            "-video_size", "640x480", 
+            "-window_title", "USB Camera Preview", 
+            real_usb_device
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        
         try:
-            # Removed the -t flag and will rely on Python to forcibly close it instead
-            proc_usb = subprocess.Popen([
-                "ffplay", 
-                "-f", "v4l2", 
-                "-framerate", "15", 
-                "-video_size", "640x480", 
-                "-window_title", "USB Camera Preview", 
-                real_usb_device
-            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            # Wait for the specific duration, then kill the process
+            proc_usb.wait(timeout=cam_dur)
+        except subprocess.TimeoutExpired:
+            proc_usb.terminate()
+            proc_usb.wait()
             
-            try:
-                # Wait for the specific duration, then kill the process
-                proc_usb.wait(timeout=cam_dur)
-            except subprocess.TimeoutExpired:
-                proc_usb.terminate()
-                proc_usb.wait()
-                
-            print(f"{datetime.now().isoformat()} USB camera test completed.")
-        except FileNotFoundError:
-            print(f"{datetime.now().isoformat()} Error: 'ffplay' not found. Please install ffmpeg.")
-    else:
-        print(f"{datetime.now().isoformat()} USB camera path does not exist: {usb_device_symlink}")
+        print(f"{datetime.now().isoformat()} USB camera test completed.")
+    except FileNotFoundError:
+        print(f"{datetime.now().isoformat()} Error: 'ffplay' not found. Please install ffmpeg.")
 
 
 def test_csi_cameras():
