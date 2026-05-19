@@ -99,11 +99,9 @@ def foodcup_callback(channel):
     state = GPIO.input(foodcup_beam_pin)
     
     if state == GPIO.LOW:  # Beam Broken
-        log_event("Input Event", "Foodcup_Entry_On")
+        log_event("Input Event", "Foodcup_Beam_Broken")
         logger.info("Foodcup beam broken (Entry)")
-    else:  # Beam Restored
-        log_event("Input Event", "Foodcup_Entry_Off")
-        log_event("Condition Event", "Foodcup_Activate")
+        log_event("Condition Event", "Foodcup_Entry")
         
         if phase == "lever":
             session_foodcup_cs_entries += 1
@@ -113,6 +111,10 @@ def foodcup_callback(channel):
             session_foodcup_iti_entries += 1
             log_event("Variable Event", "Session_Foodcup_ITI_Entries", session_foodcup_iti_entries)
             logger.info(f"Foodcup entry completed (ITI Phase). Total: {session_foodcup_iti_entries}")
+            
+    else:  # Beam Restored
+        log_event("Input Event", "Foodcup_Beam_Restored")
+        
 
 GPIO.add_event_detect(foodcup_beam_pin, GPIO.BOTH, callback=foodcup_callback, bouncetime=100)
 
@@ -167,14 +169,15 @@ try:
             if last_state == GPIO.HIGH and current_state == GPIO.LOW:
                 log_event("Input Event", "Lever_Press_On")
                 logger.info("Lever pressed down")
-            elif last_state == GPIO.LOW and current_state == GPIO.HIGH:
-                # Count logic is now triggered upon release (Off transition)
-                log_event("Input Event", "Lever_Press_Off")
-                log_event("Condition Event", "Lever_Activate")
+                
+                log_event("Condition Event", "Lever_Pressed")
                 session_lever_counts += 1
                 log_event("Variable Event", "Session_Lever_Counts", session_lever_counts)
                 logger.info(f"Lever released and counted. Total: {session_lever_counts}")
-            
+                
+            elif last_state == GPIO.LOW and current_state == GPIO.HIGH:
+                log_event("Input Event", "Lever_Press_Off")
+                            
             last_state = current_state
             time.sleep(0.01) 
 
