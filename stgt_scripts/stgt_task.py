@@ -36,9 +36,9 @@ data_csv_path = args.data_csv_path
 t0 = args.t0
 
 # =========================
-# Logging Setup
+# Unified Logging Setup
 # =========================
-log_file_path = Path("/home/capuchin/stgt_data/task_data") / f"task_log_{execution_id}.txt"
+log_file_path = Path("/home/capuchin/stgt_data/task_data") / f"system_log_{execution_id}.txt"
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] Subprocess - %(message)s",
