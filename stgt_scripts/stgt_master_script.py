@@ -88,9 +88,43 @@ def configure_schedule():
     logger.info("========== STGT SCHEDULE CONFIG ==========")
     max_trial = 12
     lever_dur = 4.0
-    iti_list = [12, 15, 18, 21, 24]
     buffer_dur = 5.0
-    logger.info(f"Schedule: max_trial={max_trial}, lever_dur={lever_dur}, iti_list={iti_list}, buffer={buffer_dur}")
+    
+    # Default ITI parameters
+    iti_min, iti_max, iti_interval = 12.0, 24.0, 3.0
+    
+    def generate_iti_list(start, end, step):
+        vals = []
+        val = start
+        while val <= end + 1e-9: # Using epsilon to avoid float rounding exclusions
+            vals.append(round(val, 3))
+            val += step
+        return vals
+
+    iti_list = generate_iti_list(iti_min, iti_max, iti_interval)
+
+    logger.info(f"Current settings: max_trial={max_trial}, lever_dur={lever_dur}, iti_list={iti_list}, buffer={buffer_dur}")
+    choice = input("\nModify settings? (y/n): ").strip().lower()
+    
+    if choice == "y":
+        max_trial = int(input(f"Enter max_trial [{max_trial}]: ") or max_trial)
+        lever_dur = float(input(f"Enter lever_dur [{lever_dur}]: ") or lever_dur)
+        
+        iti_input = input(f"Enter ITI format as 'min, max, interval' [{iti_min}, {iti_max}, {iti_interval}]: ")
+        if iti_input.strip():
+            try:
+                parts = [float(x.strip()) for x in iti_input.split(',')]
+                if len(parts) == 3:
+                    iti_min, iti_max, iti_interval = parts
+                    iti_list = generate_iti_list(iti_min, iti_max, iti_interval)
+                else:
+                    logger.error("Invalid ITI format (expected 3 numbers). Using defaults.")
+            except Exception as e:
+                logger.error(f"Error parsing ITI input: {e}. Using defaults.")
+                
+        buffer_dur = float(input(f"Enter buffer_dur [{buffer_dur}]: ") or buffer_dur)
+        
+    logger.info(f"Final schedule: max_trial={max_trial}, lever_dur={lever_dur}, iti_list={iti_list}, buffer={buffer_dur}")
     return max_trial, lever_dur, iti_list, buffer_dur
 
 # =========================
@@ -122,7 +156,7 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
     isb_active = False
     isb_until = 0.0
     presence_timeout_start = 0.0  
-    session_absence_start = 0.0 # Tracks 30s absence during an active session
+    session_absence_start = 0.0  # Tracks 30s absence during an active session
 
     # CSI state
     csi_outs = [None] * len(csi_sources)
@@ -207,7 +241,6 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                         log_event("Output Event", "USB_Camera_Recording_On", filename)
                         logger.info(f"Started USB recording: {filename}")
                         
-                        # Corrected unified camera log
                         with open(video_csv_path, "a", newline="") as f:
                             csv.writer(f).writerow([datetime.now().isoformat(), execution_id, session_number, "USB", "started", filename])
                             
@@ -249,7 +282,7 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                         session_absence_start = 0.0
                 else:
                     session_absence_start = 0.0
-            
+
             # SESSION START
             if instant_presence and not stgt_started and not isb_active:
                 session_number += 1
@@ -294,7 +327,6 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                         log_event("Output Event", f"CSI_Camera_{i}_Recording_On", filename_csi)
                         logger.info(f"Started CSI camera {cam_index}: {filename_csi}")
                         
-                        # Corrected unified camera log
                         with open(video_csv_path, "a", newline="") as f:
                             csv.writer(f).writerow([datetime.now().isoformat(), execution_id, session_number, f"CSI_{cam_index}", "started", filename_csi])
                             
