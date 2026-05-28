@@ -18,7 +18,7 @@ parser.add_argument("--execution_id", type=str)
 parser.add_argument("--session_number", type=int, default=1)
 parser.add_argument("--max_trial", type=int, default=12)
 parser.add_argument("--lever_dur", type=float, default=4.0)
-parser.add_argument("--iti_list", type=int, nargs='+', default=[12, 15, 18, 21, 24])
+parser.add_argument("--iti_list", type=float, nargs='+', default=[12.0, 15.0, 18.0, 21.0, 24.0])
 parser.add_argument("--buffer_dur", type=float, default=5.0)
 parser.add_argument("--data_csv_path", type=str, required=True)
 parser.add_argument("--t0", type=float, required=True)
@@ -99,7 +99,7 @@ def foodcup_callback(channel):
     global session_foodcup_cs_entries, session_foodcup_iti_entries, last_interaction_time
     state = GPIO.input(foodcup_beam_pin)
     
-    last_interaction_time = time.time()  # Update interaction time
+    last_interaction_time = time.time() # Update interaction time
     
     if state == GPIO.LOW:  # Beam Broken
         log_event("Input Event", "Foodcup_Beam_Broken")
@@ -117,7 +117,6 @@ def foodcup_callback(channel):
             
     else:  # Beam Restored
         log_event("Input Event", "Foodcup_Beam_Restored")
-        
 
 GPIO.add_event_detect(foodcup_beam_pin, GPIO.BOTH, callback=foodcup_callback, bouncetime=100)
 
@@ -155,6 +154,7 @@ try:
     logger.info(f"Buffer phase started ({buffer_dur}s)")
     
     early_exit = False
+    
     if wait_with_inactivity_check(buffer_dur):
         early_exit = True
     else:
@@ -189,10 +189,10 @@ try:
                 if check_inactivity():
                     early_exit = True
                     break
-
+                
                 current_state = GPIO.input(lv_press_pin)
                 if last_state == GPIO.HIGH and current_state == GPIO.LOW:
-                    last_interaction_time = time.time()  # Update interaction time
+                    last_interaction_time = time.time() # Update interaction time
                     log_event("Input Event", "Lever_Press_On")
                     logger.info("Lever pressed down")
                     
@@ -209,7 +209,7 @@ try:
 
             if early_exit:
                 break
-
+                
             log_event("Timer Event", "CS_Timer", round(lever_dur, 3))
 
             # ----- REWARD PHASE -----
@@ -237,7 +237,7 @@ try:
             if wait_with_inactivity_check(trial_iti):
                 early_exit = True
                 break
-
+                
             log_event("Timer Event", "ITI_Timer", round(trial_iti, 3))
             
             logger.info(f"Trial {trial_n + 1} completed")
@@ -245,10 +245,10 @@ try:
     if early_exit:
         log_event("Condition Event", "Session_End", "Early_Termination_90s_Inactivity")
         logger.info("Session terminating early due to 90s of inactivity.")
-        sys.exit(2)  # Code 2 notifies master to skip the ISB
+        sys.exit(2) # Code 2 notifies master to skip the ISB
     else:
         log_event("Condition Event", "Session_End", "Complete")
-        sys.exit(0)  # Code 0 = Full completion
+        sys.exit(0) # Code 0 = Full completion
 
 except KeyboardInterrupt:
     logger.info("STGT subprocess interrupted by user")
