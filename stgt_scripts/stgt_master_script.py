@@ -86,23 +86,18 @@ def estimate_fps(time_deque):
 # =========================
 def configure_schedule():
     logger.info("========== STGT SCHEDULE CONFIG ==========")
-    max_trial, lever_dur, iti_base, iti_jitter, buffer_dur = 12, 4.0, 18.0, 6.0, 5.0
-    logger.info(f"Current settings: max_trial={max_trial}, lever_dur={lever_dur}, iti={iti_base} ± {iti_jitter}, buffer={buffer_dur}")
-    choice = input("\nModify settings? (y/n): ").strip().lower()
-    if choice == "y":
-        max_trial = int(input("Enter max_trial: ") or max_trial)
-        lever_dur = float(input("Enter lever_dur: ") or lever_dur)
-        iti_base = float(input("Enter iti_base: ") or iti_base)
-        iti_jitter = float(input("Enter iti_jitter: ") or iti_jitter)
-        buffer_dur = float(input("Enter buffer_dur: ") or buffer_dur)
-    logger.info(f"Final schedule: max_trial={max_trial}, lever_dur={lever_dur}, iti={iti_base} ± {iti_jitter}, buffer={buffer_dur}")
-    return max_trial, lever_dur, iti_base, iti_jitter, buffer_dur
+    max_trial = 12
+    lever_dur = 4.0
+    iti_list = [12, 15, 18, 21, 24]
+    buffer_dur = 5.0
+    logger.info(f"Schedule: max_trial={max_trial}, lever_dur={lever_dur}, iti_list={iti_list}, buffer={buffer_dur}")
+    return max_trial, lever_dur, iti_list, buffer_dur
 
 # =========================
 # Main run
 # =========================
 def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
-    max_trial, lever_dur, iti_base, iti_jitter, buffer_dur = configure_schedule()
+    max_trial, lever_dur, iti_list, buffer_dur = configure_schedule()
 
     # Log task parameters at time 0
     log_event("Variable Event", "YOLO_Weights", weights)
@@ -110,8 +105,7 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
     log_event("Variable Event", "YOLO_Conf_Thres", conf_thres)
     log_event("Variable Event", "Task_Max_Trial", max_trial)
     log_event("Variable Event", "Task_Lever_Dur", lever_dur)
-    log_event("Variable Event", "Task_ITI_Base", iti_base)
-    log_event("Variable Event", "Task_ITI_Jitter", iti_jitter)
+    log_event("Variable Event", "Task_ITI_List", str(iti_list))
     log_event("Variable Event", "Task_Buffer_Dur", buffer_dur)
 
     # PROCESS A: USB Recording State
@@ -128,6 +122,7 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
     isb_active = False
     isb_until = 0.0
     presence_timeout_start = 0.0  
+    session_absence_start = 0.0 # Tracks 30s absence during an active session
 
     # CSI state
     csi_outs = [None] * len(csi_sources)
@@ -239,6 +234,23 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
             # ==========================================
             # PROCESS B: SESSION & CSI TRIGGER LOGIC
             # ==========================================
+            
+            # EARLY TERMINATION CHECK (30s No Monkey During Session)
+            if stgt_started:
+                if not instant_presence:
+                    if session_absence_start == 0.0:
+                        session_absence_start = current_time
+                    elif current_time - session_absence_start >= 30.0:
+                        logger.info("Monkey absent for 30s during active session. Terminating early.")
+                        log_event("Condition Event", "Session_Terminated_Early", "30s_Absence")
+                        if stgt_process:
+                            stgt_process.terminate()
+                            stgt_process.wait()
+                        session_absence_start = 0.0
+                else:
+                    session_absence_start = 0.0
+            
+            # SESSION START
             if instant_presence and not stgt_started and not isb_active:
                 session_number += 1
                 current_temp = get_cpu_temp()
@@ -247,20 +259,22 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                 log_event("Condition Event", "STGT_Subprocess_Start", session_number)
                 log_event("Timer Event", "Session_Timer_Start", 0.0)
 
-                # Start Task Subprocess
-                stgt_process = subprocess.Popen([
+                # Prepare ITI List arguments
+                cmd = [
                     "/usr/bin/python3",
                     "/home/capuchin/Desktop/stgt_scripts/stgt_task.py",
                     "--execution_id", execution_id,
                     "--session_number", str(session_number),
                     "--max_trial", str(max_trial),
                     "--lever_dur", str(lever_dur),
-                    "--iti_base", str(iti_base),
-                    "--iti_jitter", str(iti_jitter),
                     "--buffer_dur", str(buffer_dur),
                     "--data_csv_path", str(data_csv_path),
-                    "--t0", str(T0)
-                ])
+                    "--t0", str(T0),
+                    "--iti_list"
+                ] + [str(i) for i in iti_list]
+
+                # Start Task Subprocess
+                stgt_process = subprocess.Popen(cmd)
                 stgt_started = True
                 session_start_time = current_time
 
@@ -294,9 +308,9 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
             # SESSION COMPLETION & ISB INITIATION
             # ==========================================
             if stgt_started and stgt_process and stgt_process.poll() is not None:
+                ret_code = stgt_process.poll()
                 session_duration = round(current_time - session_start_time, 3)
                 log_event("Timer Event", "Session_Timer_Elapsed", session_duration)
-                log_event("Condition Event", "STGT_Subprocess_End", "Complete")
                 
                 logger.info("STGT finished. Stopping CSI cameras.")
                 for i, proc in enumerate(csi_outs):
@@ -310,14 +324,24 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                 
                 stgt_started = False
                 csi_outs = [None] * len(csi_sources)
+                session_absence_start = 0.0
                 
-                # ALWAYS start ISB when a session concludes
-                logger.info("Session complete. Starting 4-minute Inter-Session Break.")
-                isb_active = True
-                isb_until = current_time + 240.0
-                presence_timeout_start = 0  # Clean slate for timeout monitoring
-                log_event("Condition Event", "Phase_Transition", "Inter_Session_Break")
-                log_event("Timer Event", "ISB_Timer_Start", 240.0)
+                if ret_code == 0:
+                    # FULL COMPLETION: Start 4-Minute ISB
+                    log_event("Condition Event", "STGT_Subprocess_End", "Complete")
+                    logger.info("Session complete. Starting 4-minute Inter-Session Break.")
+                    isb_active = True
+                    isb_until = current_time + 240.0
+                    presence_timeout_start = 0  # Clean slate for timeout monitoring
+                    log_event("Condition Event", "Phase_Transition", "Inter_Session_Break")
+                    log_event("Timer Event", "ISB_Timer_Start", 240.0)
+                else:
+                    # EARLY TERMINATION (via 90s Inactivity OR Master 30s absence kill)
+                    log_event("Condition Event", "STGT_Subprocess_End", "Early_Termination")
+                    logger.info("Session ended early. Skipping ISB. System primed for new arrival.")
+                    isb_active = False
+                    session_subject_present = False
+                    presence_timeout_start = 0
 
 
             # ==========================================
