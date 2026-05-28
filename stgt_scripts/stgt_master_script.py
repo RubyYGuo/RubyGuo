@@ -91,7 +91,7 @@ def configure_schedule():
     buffer_dur = 5.0
     
     # Default ITI parameters
-    iti_min, iti_max, iti_interval = 12.0, 24.0, 3.0
+    iti_min, iti_max, iti_step = 12.0, 24.0, 3.0
     
     def generate_iti_list(start, end, step):
         vals = []
@@ -101,7 +101,7 @@ def configure_schedule():
             val += step
         return vals
 
-    iti_list = generate_iti_list(iti_min, iti_max, iti_interval)
+    iti_list = generate_iti_list(iti_min, iti_max, iti_step)
 
     logger.info(f"Current settings: max_trial={max_trial}, lever_dur={lever_dur}, iti_list={iti_list}, buffer={buffer_dur}")
     choice = input("\nModify settings? (y/n): ").strip().lower()
@@ -110,13 +110,13 @@ def configure_schedule():
         max_trial = int(input(f"Enter max_trial [{max_trial}]: ") or max_trial)
         lever_dur = float(input(f"Enter lever_dur [{lever_dur}]: ") or lever_dur)
         
-        iti_input = input(f"Enter ITI format as 'min, max, interval' [{iti_min}, {iti_max}, {iti_interval}]: ")
+        iti_input = input(f"Enter ITI format as 'min, max, s' [{iti_min}, {iti_max}, {iti_step}]: ")
         if iti_input.strip():
             try:
                 parts = [float(x.strip()) for x in iti_input.split(',')]
                 if len(parts) == 3:
-                    iti_min, iti_max, iti_interval = parts
-                    iti_list = generate_iti_list(iti_min, iti_max, iti_interval)
+                    iti_min, iti_max, iti_step = parts
+                    iti_list = generate_iti_list(iti_min, iti_max, iti_step)
                 else:
                     logger.error("Invalid ITI format (expected 3 numbers). Using defaults.")
             except Exception as e:
