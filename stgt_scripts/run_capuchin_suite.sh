@@ -1,5 +1,35 @@
 #!/bin/bash
 
+# =========================
+# System Time Check
+# =========================
+echo "Current System Date and Time:"
+date "+%Y-%m-%d %H:%M:%S"
+echo ""
+read -p "Is this date and time correct? (y/n): " time_choice
+
+if [[ "$time_choice" == "n" || "$time_choice" == "N" ]]; then
+    echo ""
+    echo "Please enter the correct date and time in the following format:"
+    echo "YYYY-MM-DD HH:MM (e.g., 2026-05-28 14:30)"
+    read -p "New Time: " new_time
+    
+    echo "Applying new time (you may be prompted for your sudo password)..."
+    # Automatically append :00 for the seconds
+    sudo date -s "${new_time}:00"
+    
+    echo ""
+    echo "Time updated successfully to:"
+    date "+%Y-%m-%d %H:%M:%S"
+    echo "----------------------------------------"
+else
+    echo "Time confirmed. Proceeding..."
+    echo "----------------------------------------"
+fi
+
+# =========================
+# Task Execution
+# =========================
 # Load conda
 source "$HOME/miniconda3/etc/profile.d/conda.sh"
 
