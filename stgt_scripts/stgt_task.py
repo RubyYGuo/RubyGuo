@@ -9,6 +9,7 @@ from pathlib import Path
 import RPi.GPIO as GPIO
 import random
 import argparse
+import signal
 
 # =========================
 # Arguments & Parameters
@@ -46,6 +47,16 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+# =========================
+# Signal Handler
+# =========================
+# Ensures that if master.py kills this script mid-trial, it triggers the finally block
+def sigterm_handler(signum, frame):
+    logger.info("Received termination signal from Master. Aborting session.")
+    raise KeyboardInterrupt
+
+signal.signal(signal.SIGTERM, sigterm_handler)
 
 # =========================
 # Data Logging Helper
@@ -257,5 +268,16 @@ except KeyboardInterrupt:
 finally:
     phase = "idle"
     log_event("Variable Event", "Task_Phase_State", "idle")
+    
+    # EXPLICIT HARDWARE RESET
+    # Ensures all relays turn off (assuming True = off) regardless of crash or master termination
+    try:
+        GPIO.output(relay_lv_out, True)
+        GPIO.output(relay_cue_light, True)
+        GPIO.output(relay_dispenser, True)
+        logger.info("Hardware explicitly reset to safe state.")
+    except Exception:
+        pass
+
     GPIO.cleanup()
     logger.info("Subprocess complete, GPIO cleaned up")
