@@ -156,7 +156,7 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
     isb_active = False
     isb_until = 0.0
     presence_timeout_start = 0.0  
-    session_absence_start = 0.0  # Tracks 30s absence during an active session
+    session_absence_start = 0.0  # Tracks 90s absence during an active session
 
     # CSI state
     csi_outs = [None] * len(csi_sources)
@@ -241,6 +241,7 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                         log_event("Output Event", "USB_Camera_Recording_On", filename)
                         logger.info(f"Started USB recording: {filename}")
                         
+                        # Corrected unified camera log
                         with open(video_csv_path, "a", newline="") as f:
                             csv.writer(f).writerow([datetime.now().isoformat(), execution_id, session_number, "USB", "started", filename])
                             
@@ -268,14 +269,14 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
             # PROCESS B: SESSION & CSI TRIGGER LOGIC
             # ==========================================
             
-            # EARLY TERMINATION CHECK (30s No Monkey During Session)
+            # EARLY TERMINATION CHECK (90s No Monkey During Session)
             if stgt_started:
                 if not instant_presence:
                     if session_absence_start == 0.0:
                         session_absence_start = current_time
-                    elif current_time - session_absence_start >= 30.0:
-                        logger.info("Monkey absent for 30s during active session. Terminating early.")
-                        log_event("Condition Event", "Session_Terminated_Early", "30s_Absence")
+                    elif current_time - session_absence_start >= 90.0:
+                        logger.info("Monkey absent for 90s during active session. Terminating early.")
+                        log_event("Condition Event", "Session_Terminated_Early", "90s_Absence")
                         if stgt_process:
                             stgt_process.terminate()
                             stgt_process.wait()
@@ -327,6 +328,7 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                         log_event("Output Event", f"CSI_Camera_{i}_Recording_On", filename_csi)
                         logger.info(f"Started CSI camera {cam_index}: {filename_csi}")
                         
+                        # Corrected unified camera log
                         with open(video_csv_path, "a", newline="") as f:
                             csv.writer(f).writerow([datetime.now().isoformat(), execution_id, session_number, f"CSI_{cam_index}", "started", filename_csi])
                             
@@ -368,7 +370,7 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                     log_event("Condition Event", "Phase_Transition", "Inter_Session_Break")
                     log_event("Timer Event", "ISB_Timer_Start", 240.0)
                 else:
-                    # EARLY TERMINATION (via 90s Inactivity OR Master 30s absence kill)
+                    # EARLY TERMINATION (via 90s Inactivity OR Master 90s absence kill)
                     log_event("Condition Event", "STGT_Subprocess_End", "Early_Termination")
                     logger.info("Session ended early. Skipping ISB. System primed for new arrival.")
                     isb_active = False
