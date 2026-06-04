@@ -86,6 +86,7 @@ def estimate_fps(time_deque):
 # =========================
 def configure_schedule():
     logger.info("========== STGT SCHEDULE CONFIG ==========")
+    phase = "task"
     max_trial = 12
     lever_dur = 4.0
     buffer_dur = 5.0
@@ -103,40 +104,50 @@ def configure_schedule():
 
     iti_list = generate_iti_list(iti_min, iti_max, iti_step)
 
-    logger.info(f"Current settings: max_trial={max_trial}, lever_dur={lever_dur}, iti_list={iti_list}, buffer={buffer_dur}")
+    logger.info(f"Current settings: phase={phase}, max_trial={max_trial}, lever_dur={lever_dur}, iti_list={iti_list}, buffer={buffer_dur}")
     choice = input("\nModify settings? (y/n): ").strip().lower()
     
     if choice == "y":
+        phase_input = input(f"Enter phase (task/habituation) [{phase}]: ").strip().lower()
+        if phase_input in ["task", "habituation"]:
+            phase = phase_input
+        else:
+            logger.error("Invalid phase. Using default 'task'.")
+
         max_trial = int(input(f"Enter max_trial [{max_trial}]: ") or max_trial)
-        lever_dur = float(input(f"Enter lever_dur [{lever_dur}]: ") or lever_dur)
         
-        iti_input = input(f"Enter ITI format as 'min, max, s' [{iti_min}, {iti_max}, {iti_step}]: ")
-        if iti_input.strip():
-            try:
-                parts = [float(x.strip()) for x in iti_input.split(',')]
-                if len(parts) == 3:
-                    iti_min, iti_max, iti_step = parts
-                    iti_list = generate_iti_list(iti_min, iti_max, iti_step)
-                else:
-                    logger.error("Invalid ITI format (expected 3 numbers). Using defaults.")
-            except Exception as e:
-                logger.error(f"Error parsing ITI input: {e}. Using defaults.")
-                
+        if phase == "task":
+            lever_dur = float(input(f"Enter lever_dur [{lever_dur}]: ") or lever_dur)
+            iti_input = input(f"Enter ITI format as 'min, max, s' [{iti_min}, {iti_max}, {iti_step}]: ")
+            if iti_input.strip():
+                try:
+                    parts = [float(x.strip()) for x in iti_input.split(',')]
+                    if len(parts) == 3:
+                        iti_min, iti_max, iti_step = parts
+                        iti_list = generate_iti_list(iti_min, iti_max, iti_step)
+                    else:
+                        logger.error("Invalid ITI format (expected 3 numbers). Using defaults.")
+                except Exception as e:
+                    logger.error(f"Error parsing ITI input: {e}. Using defaults.")
+        else:
+            logger.info("Habituation phase selected. Skipping lever and ITI configuration.")
+            
         buffer_dur = float(input(f"Enter buffer_dur [{buffer_dur}]: ") or buffer_dur)
         
-    logger.info(f"Final schedule: max_trial={max_trial}, lever_dur={lever_dur}, iti_list={iti_list}, buffer={buffer_dur}")
-    return max_trial, lever_dur, iti_list, buffer_dur
+    logger.info(f"Final schedule: phase={phase}, max_trial={max_trial}, lever_dur={lever_dur}, iti_list={iti_list}, buffer={buffer_dur}")
+    return phase, max_trial, lever_dur, iti_list, buffer_dur
 
 # =========================
 # Main run
 # =========================
 def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
-    max_trial, lever_dur, iti_list, buffer_dur = configure_schedule()
+    phase, max_trial, lever_dur, iti_list, buffer_dur = configure_schedule()
 
     # Log task parameters at time 0
     log_event("Variable Event", "YOLO_Weights", weights)
     log_event("Variable Event", "YOLO_Img_Size", img_size)
     log_event("Variable Event", "YOLO_Conf_Thres", conf_thres)
+    log_event("Variable Event", "Task_Phase", phase)
     log_event("Variable Event", "Task_Max_Trial", max_trial)
     log_event("Variable Event", "Task_Lever_Dur", lever_dur)
     log_event("Variable Event", "Task_ITI_List", str(iti_list))
@@ -293,12 +304,13 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                 log_event("Condition Event", "STGT_Subprocess_Start", session_number)
                 log_event("Timer Event", "Session_Timer_Start", 0.0)
 
-                # Prepare ITI List arguments
+                # Prepare subprocess arguments
                 cmd = [
                     "/usr/bin/python3",
                     "/home/capuchin/Desktop/stgt_scripts/stgt_task.py",
                     "--execution_id", execution_id,
                     "--session_number", str(session_number),
+                    "--phase", phase,
                     "--max_trial", str(max_trial),
                     "--lever_dur", str(lever_dur),
                     "--buffer_dur", str(buffer_dur),
