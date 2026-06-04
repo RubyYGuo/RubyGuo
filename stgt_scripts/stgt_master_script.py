@@ -86,37 +86,51 @@ def estimate_fps(time_deque):
 # =========================
 def configure_schedule():
     logger.info("========== STGT SCHEDULE CONFIG ==========")
-    phase = "task"
-    max_trial = 12
-    lever_dur = 4.0
-    buffer_dur = 5.0
     
-    # Default ITI parameters
-    iti_min, iti_max, iti_step = 12.0, 24.0, 3.0
+    while True:
+        print("\nSelect Operating Mode:")
+        print("1) Run ST/GT Task")
+        print("2) Run Habituation")
+        print("3) Exit")
+        choice = input("Enter choice (1-3): ").strip()
+        
+        if choice == '1':
+            phase = "task"
+            break
+        elif choice == '2':
+            phase = "habituation"
+            break
+        elif choice == '3':
+            logger.info("System closed by user at configuration menu.")
+            sys.exit(0)
+        else:
+            print("Invalid input. Please enter 1, 2, or 3.")
+
+    # Default parameters shared or specific
+    max_trial = 12
+    buffer_dur = 5.0
+    hab_base = 5.0
+    hab_jitter = 1.0
+    lever_dur = 4.0
+    iti_list = []
     
     def generate_iti_list(start, end, step):
         vals = []
         val = start
-        while val <= end + 1e-9: # Using epsilon to avoid float rounding exclusions
+        while val <= end + 1e-9:
             vals.append(round(val, 3))
             val += step
         return vals
 
-    iti_list = generate_iti_list(iti_min, iti_max, iti_step)
-
-    logger.info(f"Current settings: phase={phase}, max_trial={max_trial}, lever_dur={lever_dur}, iti_list={iti_list}, buffer={buffer_dur}")
-    choice = input("\nModify settings? (y/n): ").strip().lower()
-    
-    if choice == "y":
-        phase_input = input(f"Enter phase (task/habituation) [{phase}]: ").strip().lower()
-        if phase_input in ["task", "habituation"]:
-            phase = phase_input
-        else:
-            logger.error("Invalid phase. Using default 'task'.")
-
-        max_trial = int(input(f"Enter max_trial [{max_trial}]: ") or max_trial)
+    if phase == "task":
+        iti_min, iti_max, iti_step = 12.0, 24.0, 3.0
+        iti_list = generate_iti_list(iti_min, iti_max, iti_step)
         
-        if phase == "task":
+        logger.info(f"Current defaults: phase={phase}, max_trial={max_trial}, lever_dur={lever_dur}, iti_list={iti_list}, buffer={buffer_dur}")
+        modify = input("\nModify these default settings? (y/n): ").strip().lower()
+        
+        if modify == "y":
+            max_trial = int(input(f"Enter max_trial [{max_trial}]: ") or max_trial)
             lever_dur = float(input(f"Enter lever_dur [{lever_dur}]: ") or lever_dur)
             iti_input = input(f"Enter ITI format as 'min, max, s' [{iti_min}, {iti_max}, {iti_step}]: ")
             if iti_input.strip():
@@ -126,22 +140,29 @@ def configure_schedule():
                         iti_min, iti_max, iti_step = parts
                         iti_list = generate_iti_list(iti_min, iti_max, iti_step)
                     else:
-                        logger.error("Invalid ITI format (expected 3 numbers). Using defaults.")
+                        logger.error("Invalid ITI format. Using defaults.")
                 except Exception as e:
                     logger.error(f"Error parsing ITI input: {e}. Using defaults.")
-        else:
-            logger.info("Habituation phase selected. Skipping lever and ITI configuration.")
-            
-        buffer_dur = float(input(f"Enter buffer_dur [{buffer_dur}]: ") or buffer_dur)
+            buffer_dur = float(input(f"Enter buffer_dur [{buffer_dur}]: ") or buffer_dur)
+
+    elif phase == "habituation":
+        logger.info(f"Current defaults: phase={phase}, max_trial={max_trial}, trial_duration={hab_base}s ±{hab_jitter}s, buffer={buffer_dur}")
+        modify = input("\nModify these default settings? (y/n): ").strip().lower()
         
-    logger.info(f"Final schedule: phase={phase}, max_trial={max_trial}, lever_dur={lever_dur}, iti_list={iti_list}, buffer={buffer_dur}")
-    return phase, max_trial, lever_dur, iti_list, buffer_dur
+        if modify == "y":
+            max_trial = int(input(f"Enter max_trial [{max_trial}]: ") or max_trial)
+            hab_base = float(input(f"Enter base trial duration (s) [{hab_base}]: ") or hab_base)
+            hab_jitter = float(input(f"Enter trial duration jitter (s) [{hab_jitter}]: ") or hab_jitter)
+            buffer_dur = float(input(f"Enter buffer_dur [{buffer_dur}]: ") or buffer_dur)
+            
+    logger.info(f"Final schedule: phase={phase}, max_trial={max_trial}, buffer={buffer_dur}")
+    return phase, max_trial, lever_dur, iti_list, buffer_dur, hab_base, hab_jitter
 
 # =========================
 # Main run
 # =========================
 def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
-    phase, max_trial, lever_dur, iti_list, buffer_dur = configure_schedule()
+    phase, max_trial, lever_dur, iti_list, buffer_dur, hab_base, hab_jitter = configure_schedule()
 
     # Log task parameters at time 0
     log_event("Variable Event", "YOLO_Weights", weights)
@@ -149,9 +170,13 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
     log_event("Variable Event", "YOLO_Conf_Thres", conf_thres)
     log_event("Variable Event", "Task_Phase", phase)
     log_event("Variable Event", "Task_Max_Trial", max_trial)
-    log_event("Variable Event", "Task_Lever_Dur", lever_dur)
-    log_event("Variable Event", "Task_ITI_List", str(iti_list))
     log_event("Variable Event", "Task_Buffer_Dur", buffer_dur)
+    if phase == "task":
+        log_event("Variable Event", "Task_Lever_Dur", lever_dur)
+        log_event("Variable Event", "Task_ITI_List", str(iti_list))
+    elif phase == "habituation":
+        log_event("Variable Event", "Habituation_Base_Dur", hab_base)
+        log_event("Variable Event", "Habituation_Jitter", hab_jitter)
 
     # PROCESS A: USB Recording State
     recording = False
@@ -167,7 +192,11 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
     isb_active = False
     isb_until = 0.0
     presence_timeout_start = 0.0  
-    session_absence_start = 0.0  # Tracks 90s absence during an active session
+    session_absence_start = 0.0  
+    last_temp_log_time = time.time()
+    
+    # Establish conditional absence threshold
+    absence_limit = 30.0 if phase == "habituation" else 90.0
 
     # CSI state
     csi_outs = [None] * len(csi_sources)
@@ -199,7 +228,6 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
     FRAME_HEIGHT = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     time_deque = deque(maxlen=30)
 
-    # Setup Corrected Video Log CSV
     if not video_csv_path.exists():
         with open(video_csv_path, "w", newline="") as f:
             csv.writer(f).writerow(["timestamp", "execution_id", "session_number", "camera", "status", "video_filename"])
@@ -217,6 +245,14 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
 
             time_deque.append(current_time)
             estimated_fps = estimate_fps(time_deque)
+
+            # ==========================================
+            # 10-MINUTE HARDWARE DIAGNOSTICS LOG
+            # ==========================================
+            if current_time - last_temp_log_time >= 600.0:
+                current_temp = get_cpu_temp()
+                log_event("Diagnostic Event", "CPU_Temperature_Log", f"{current_temp} (10min interval)")
+                last_temp_log_time = current_time
 
             # ==========================================
             # GLOBAL YOLO DETECTION (Runs Every Frame)
@@ -252,7 +288,6 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                         log_event("Output Event", "USB_Camera_Recording_On", filename)
                         logger.info(f"Started USB recording: {filename}")
                         
-                        # Corrected unified camera log
                         with open(video_csv_path, "a", newline="") as f:
                             csv.writer(f).writerow([datetime.now().isoformat(), execution_id, session_number, "USB", "started", filename])
                             
@@ -280,14 +315,14 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
             # PROCESS B: SESSION & CSI TRIGGER LOGIC
             # ==========================================
             
-            # EARLY TERMINATION CHECK (90s No Monkey During Session)
+            # EARLY TERMINATION CHECK 
             if stgt_started:
                 if not instant_presence:
                     if session_absence_start == 0.0:
                         session_absence_start = current_time
-                    elif current_time - session_absence_start >= 90.0:
-                        logger.info("Monkey absent for 90s during active session. Terminating early.")
-                        log_event("Condition Event", "Session_Terminated_Early", "90s_Absence")
+                    elif current_time - session_absence_start >= absence_limit:
+                        logger.info(f"Subject absent for {absence_limit}s during active session. Terminating early.")
+                        log_event("Condition Event", "Session_Terminated_Early", f"{absence_limit}s_Absence")
                         if stgt_process:
                             stgt_process.terminate()
                             stgt_process.wait()
@@ -300,11 +335,12 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                 session_number += 1
                 current_temp = get_cpu_temp()
                 
-                log_event("Diagnostic Event", "CPU_Temperature_Log", current_temp)
+                log_event("Diagnostic Event", "CPU_Temperature_Log", f"{current_temp} (Session Start)")
+                last_temp_log_time = current_time 
+
                 log_event("Condition Event", "STGT_Subprocess_Start", session_number)
                 log_event("Timer Event", "Session_Timer_Start", 0.0)
 
-                # Prepare subprocess arguments
                 cmd = [
                     "/usr/bin/python3",
                     "/home/capuchin/Desktop/stgt_scripts/stgt_task.py",
@@ -314,10 +350,14 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                     "--max_trial", str(max_trial),
                     "--lever_dur", str(lever_dur),
                     "--buffer_dur", str(buffer_dur),
+                    "--hab_base", str(hab_base),
+                    "--hab_jitter", str(hab_jitter),
                     "--data_csv_path", str(data_csv_path),
-                    "--t0", str(T0),
-                    "--iti_list"
-                ] + [str(i) for i in iti_list]
+                    "--t0", str(T0)
+                ]
+                if iti_list:
+                    cmd.append("--iti_list")
+                    cmd.extend([str(i) for i in iti_list])
 
                 # Start Task Subprocess
                 stgt_process = subprocess.Popen(cmd)
@@ -340,7 +380,6 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                         log_event("Output Event", f"CSI_Camera_{i}_Recording_On", filename_csi)
                         logger.info(f"Started CSI camera {cam_index}: {filename_csi}")
                         
-                        # Corrected unified camera log
                         with open(video_csv_path, "a", newline="") as f:
                             csv.writer(f).writerow([datetime.now().isoformat(), execution_id, session_number, f"CSI_{cam_index}", "started", filename_csi])
                             
@@ -358,6 +397,10 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                 session_duration = round(current_time - session_start_time, 3)
                 log_event("Timer Event", "Session_Timer_Elapsed", session_duration)
                 
+                current_temp = get_cpu_temp()
+                log_event("Diagnostic Event", "CPU_Temperature_Log", f"{current_temp} (Session End)")
+                last_temp_log_time = current_time 
+
                 logger.info("STGT finished. Stopping CSI cameras.")
                 for i, proc in enumerate(csi_outs):
                     if proc:
@@ -378,11 +421,11 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                     logger.info("Session complete. Starting 4-minute Inter-Session Break.")
                     isb_active = True
                     isb_until = current_time + 240.0
-                    presence_timeout_start = 0  # Clean slate for timeout monitoring
+                    presence_timeout_start = 0 
                     log_event("Condition Event", "Phase_Transition", "Inter_Session_Break")
                     log_event("Timer Event", "ISB_Timer_Start", 240.0)
                 else:
-                    # EARLY TERMINATION (via 90s Inactivity OR Master 90s absence kill)
+                    # EARLY TERMINATION 
                     log_event("Condition Event", "STGT_Subprocess_End", "Early_Termination")
                     logger.info("Session ended early. Skipping ISB. System primed for new arrival.")
                     isb_active = False
@@ -421,7 +464,6 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                         presence_timeout_start = 0
                         session_subject_present = False
 
-                # Check for natural expiration of the 4-minute wait
                 if isb_active and current_time >= isb_until:
                     logger.info("Inter-Session Break elapsed. Ready for next session.")
                     log_event("Timer Event", "ISB_Timer_Elapsed", 240.0)
