@@ -26,6 +26,7 @@ FOODCUP_BEAM_PIN = 21  # Matched to your subprocess wiring
 GPIO.setmode(GPIO.BCM)
 # Set up the beam pin with a pull-up resistor
 GPIO.setup(FOODCUP_BEAM_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+
 # =========================
 # Setup & Initialization
 # =========================
@@ -256,259 +257,277 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
     frame_counter = 0
     instant_presence = False
     ratio = 0.0
+    disable_task_spawning = False  # Flag to prevent STGT from running after user abort
 
     try:
         while True:
-            current_time = time.time()
-            ret, frame = cap.read()
-            if not ret:
-                time.sleep(0.05)
-                continue
+            try:
+                current_time = time.time()
+                ret, frame = cap.read()
+                if not ret:
+                    time.sleep(0.05)
+                    continue
 
-            frame_counter += 1
-            time_deque.append(current_time)
-            estimated_fps = estimate_fps(time_deque)
+                frame_counter += 1
+                time_deque.append(current_time)
+                estimated_fps = estimate_fps(time_deque)
 
-            # ==========================================
-            # 10-MINUTE HARDWARE DIAGNOSTICS LOG
-            # ==========================================
-            if current_time - last_temp_log_time >= 600.0:
-                current_temp = get_cpu_temp()
-                log_event("Diagnostic Event", "CPU_Temperature_Log", f"{current_temp} (10min interval)")
-                last_temp_log_time = current_time
+                # ==========================================
+                # 10-MINUTE HARDWARE DIAGNOSTICS LOG
+                # ==========================================
+                if current_time - last_temp_log_time >= 600.0:
+                    current_temp = get_cpu_temp()
+                    log_event("Diagnostic Event", "CPU_Temperature_Log", f"{current_temp} (10min interval)")
+                    last_temp_log_time = current_time
 
-            # ==========================================
-            # GLOBAL YOLO DETECTION (Decimated Frame Processing)
-            # ==========================================
-            if frame_counter % 6 == 0:
-                # 1. Update YOLO Face Detection Ratio
-                results = model(frame, imgsz=img_size, conf=conf_thres, iou=0.4, verbose=False)
-                raw_detection = len(results[0].boxes) > 0
-                detection_window.append(1 if raw_detection else 0)
-                ratio = sum(detection_window) / len(detection_window) if len(detection_window) > 0 else 0
-                
-                # 2. Evaluate Both Triggers
-                face_detected = (ratio >= 0.50)
-                beam_broken = (GPIO.input(FOODCUP_BEAM_PIN) == GPIO.LOW)
-                
-                # 3. Combine with OR Logic
-                instant_presence = (face_detected or beam_broken)
-
-                # 4. Log official session arrival
-                if instant_presence and not session_subject_present:
-                    session_subject_present = True
+                # ==========================================
+                # GLOBAL YOLO DETECTION (Decimated Frame Processing)
+                # ==========================================
+                if frame_counter % 6 == 0:
+                    # 1. Update YOLO Face Detection Ratio
+                    results = model(frame, imgsz=img_size, conf=conf_thres, iou=0.4, verbose=False)
+                    raw_detection = len(results[0].boxes) > 0
+                    detection_window.append(1 if raw_detection else 0)
+                    ratio = sum(detection_window) / len(detection_window) if len(detection_window) > 0 else 0
                     
-                    # Optional: Log what actually triggered the start (Face, Beam, or Both)
-                    trigger_source = "Both" if (face_detected and beam_broken) else ("Face" if face_detected else "Beam")
-                    log_event("Variable Event", "Trigger_Source", trigger_source)
+                    # 2. Evaluate Both Triggers
+                    face_detected = (ratio >= 0.50)
+                    beam_broken = (GPIO.input(FOODCUP_BEAM_PIN) == GPIO.LOW)
                     
-                    # Original logging preserved for your downstream data analysis
-                    log_event("Variable Event", "YOLO_Detection_Ratio", round(ratio, 2))
-                    log_event("Variable Event", "Subject_Present_Flag", 1)
-                    log_event("Variable Event", "Face_Detection", 1 if face_detected else 0) 
-                    log_event("Variable Event", "Station_Active", 1)
+                    # 3. Combine with OR Logic
+                    instant_presence = (face_detected or beam_broken)
 
-
-            # ==========================================
-            # PROCESS A: INDEPENDENT USB RECORDING
-            # ==========================================
-            if instant_presence:
-                usb_last_seen = current_time
-                if not recording:
-                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    filename = f"{timestamp}_FRONT_capuchin.mp4"
-                    out_path = record_dir / filename
-                    try:
-                        out = cv2.VideoWriter(str(out_path), cv2.VideoWriter_fourcc(*'mp4v'), estimated_fps, (FRAME_WIDTH, FRAME_HEIGHT))
-                        recording = True
-                        log_event("Output Event", "USB_Camera_Recording_On", filename)
-                        logger.info(f"Started USB recording: {filename}")
+                    # 4. Log official session arrival
+                    if instant_presence and not session_subject_present:
+                        session_subject_present = True
                         
-                        with open(video_csv_path, "a", newline="") as f:
-                            csv.writer(f).writerow([datetime.now().isoformat(), execution_id, session_number, "USB", "started", filename])
-                            
-                    except Exception as e:
-                        logger.error(f"Failed to start USB recording: {e}")
-                        log_event("Error Event", "USB_Camera", f"Failed to write video: {e}")
-
-            if recording:
-                if out: out.write(frame)
-                
-                # Strict 10-second absence stops the video immediately
-                if not instant_presence and (current_time - usb_last_seen > 10.0):
-                    logger.info(f"Stopping USB recording: {filename}")
-                    if out: out.release()
-                    recording = False
-                    out = None
-                    log_event("Output Event", "USB_Camera_Recording_Off", "")
-                    
-                    with open(video_csv_path, "a", newline="") as f:
-                        csv.writer(f).writerow([datetime.now().isoformat(), execution_id, session_number, "USB", "stopped", filename])
-                    filename = ""
-
-
-            # ==========================================
-            # PROCESS B: SESSION & CSI TRIGGER LOGIC
-            # ==========================================
-            
-            # EARLY TERMINATION CHECK 
-            if stgt_started:
-                if not instant_presence:
-                    if session_absence_start == 0.0:
-                        session_absence_start = current_time
-                    elif current_time - session_absence_start >= absence_limit:
-                        logger.info(f"Subject absent for {absence_limit}s during active session. Terminating early.")
-                        log_event("Condition Event", "Session_Terminated_Early", f"{absence_limit}s_Absence")
-                        if stgt_process:
-                            stgt_process.terminate()
-                            stgt_process.wait()
-                        session_absence_start = 0.0
-                else:
-                    session_absence_start = 0.0
-
-            # SESSION START
-            if instant_presence and not stgt_started and not isb_active:
-                session_number += 1
-                current_temp = get_cpu_temp()
-                
-                log_event("Diagnostic Event", "CPU_Temperature_Log", f"{current_temp} (Session Start)")
-                last_temp_log_time = current_time 
-
-                log_event("Condition Event", "STGT_Subprocess_Start", session_number)
-                log_event("Timer Event", "Session_Timer_Start", 0.0)
-
-                cmd = [
-                    "/usr/bin/python3",
-                    "/home/capuchin/Desktop/stgt_scripts/stgt_task.py",
-                    "--execution_id", execution_id,
-                    "--session_number", str(session_number),
-                    "--phase", phase,
-                    "--max_trial", str(max_trial),
-                    "--lever_dur", str(lever_dur),
-                    "--buffer_dur", str(buffer_dur),
-                    "--hab_base", str(hab_base),
-                    "--hab_jitter", str(hab_jitter),
-                    "--data_csv_path", str(data_csv_path),
-                    "--t0", str(T0)
-                ]
-                if iti_list:
-                    cmd.append("--iti_list")
-                    cmd.extend([str(i) for i in iti_list])
-
-                # Start Task Subprocess
-                stgt_process = subprocess.Popen(cmd)
-                stgt_started = True
-                session_start_time = current_time
-
-                # Start CSI cameras
-                for i, cam_index in enumerate(csi_sources):
-                    timestamp_csi = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    filename_csi = f"{timestamp_csi}_csi_cam{i}.mp4"
-                    out_path_csi = record_dir / filename_csi
-                    try:
-                        proc = subprocess.Popen([
-                            "rpicam-vid", "-t", "0", "-n", "--inline",
-                            "--width", "640", "--height", "480", "--framerate", "15",
-                            "--camera", str(cam_index), "-o", str(out_path_csi)
-                        ])
-                        csi_outs[i] = proc
-                        csi_filenames[i] = filename_csi
-                        log_event("Output Event", f"CSI_Camera_{i}_Recording_On", filename_csi)
-                        logger.info(f"Started CSI camera {cam_index}: {filename_csi}")
+                        # Optional: Log what actually triggered the start (Face, Beam, or Both)
+                        trigger_source = "Both" if (face_detected and beam_broken) else ("Face" if face_detected else "Beam")
+                        log_event("Variable Event", "Trigger_Source", trigger_source)
                         
-                        with open(video_csv_path, "a", newline="") as f:
-                            csv.writer(f).writerow([datetime.now().isoformat(), execution_id, session_number, f"CSI_{cam_index}", "started", filename_csi])
-                            
-                    except Exception as e:
-                        logger.error(f"Failed to start CSI camera {cam_index}: {e}")
-                        log_event("Error Event", f"CSI_Camera_{cam_index}", f"Failed to start: {e}")
-                        csi_outs[i] = None
-
-
-            # ==========================================
-            # SESSION COMPLETION & ISB INITIATION
-            # ==========================================
-            if stgt_started and stgt_process and stgt_process.poll() is not None:
-                ret_code = stgt_process.poll()
-                session_duration = round(current_time - session_start_time, 3)
-                log_event("Timer Event", "Session_Timer_Elapsed", session_duration)
-                
-                current_temp = get_cpu_temp()
-                log_event("Diagnostic Event", "CPU_Temperature_Log", f"{current_temp} (Session End)")
-                last_temp_log_time = current_time 
-
-                logger.info("STGT finished. Stopping CSI cameras.")
-                for i, proc in enumerate(csi_outs):
-                    if proc:
-                        proc.send_signal(signal.SIGINT)
-                        proc.wait()
-                        log_event("Output Event", f"CSI_Camera_{i}_Recording_Off", "")
-                        
-                        with open(video_csv_path, "a", newline="") as f:
-                            csv.writer(f).writerow([datetime.now().isoformat(), execution_id, session_number, f"CSI_{csi_sources[i]}", "stopped", str(csi_filenames[i])])
-                
-                stgt_started = False
-                csi_outs = [None] * len(csi_sources)
-                session_absence_start = 0.0
-                
-                if ret_code == 0:
-                    # FULL COMPLETION: Start 4-Minute ISB
-                    log_event("Condition Event", "STGT_Subprocess_End", "Complete")
-                    logger.info("Session complete. Starting 4-minute Inter-Session Break.")
-                    isb_active = True
-                    isb_until = current_time + 240.0
-                    presence_timeout_start = 0 
-                    log_event("Condition Event", "Phase_Transition", "Inter_Session_Break")
-                    log_event("Timer Event", "ISB_Timer_Start", 240.0)
-                else:
-                    # EARLY TERMINATION 
-                    log_event("Condition Event", "STGT_Subprocess_End", "Early_Termination")
-                    logger.info("Monkey might have left. Skipping ISB. System primed for new arrival.")
-                    isb_active = False
-                    session_subject_present = False
-                    presence_timeout_start = 0
-
-
-            # ==========================================
-            # ISB 30-SECOND DEPARTURE TRACKING
-            # ==========================================
-            if isb_active:
-                if instant_presence:
-                    if presence_timeout_start != 0:
-                        logger.info("Subject returned before timeout elapsed. Cancelling timeout.")
-                        log_event("Condition Event", "Presence_Timeout_Cancelled", "Subject Returned")
-                        presence_timeout_start = 0 
-                else:
-                    if presence_timeout_start == 0:
-                        presence_timeout_start = current_time
+                        # Original logging preserved for your downstream data analysis
                         log_event("Variable Event", "YOLO_Detection_Ratio", round(ratio, 2))
-                        log_event("Condition Event", "Presence_Timeout_Begin", 30.0)
-                    elif current_time - presence_timeout_start >= 30.0:
-                        logger.info("Subject departed. 30-second presence timeout elapsed.")
-                        log_event("Timer Event", "Presence_Timeout_Elapsed", 30.0)
-                        log_event("Variable Event", "Subject_Present_Flag", 0)
-                        log_event("Variable Event", "Face_Detection", 0)
-                        log_event("Variable Event", "Station_Active", 0)
+                        log_event("Variable Event", "Subject_Present_Flag", 1)
+                        log_event("Variable Event", "Face_Detection", 1 if face_detected else 0) 
+                        log_event("Variable Event", "Station_Active", 1)
+
+
+                # ==========================================
+                # PROCESS A: INDEPENDENT USB RECORDING
+                # ==========================================
+                if instant_presence:
+                    usb_last_seen = current_time
+                    if not recording:
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        filename = f"{timestamp}_FRONT_capuchin.mp4"
+                        out_path = record_dir / filename
+                        try:
+                            out = cv2.VideoWriter(str(out_path), cv2.VideoWriter_fourcc(*'mp4v'), estimated_fps, (FRAME_WIDTH, FRAME_HEIGHT))
+                            recording = True
+                            log_event("Output Event", "USB_Camera_Recording_On", filename)
+                            logger.info(f"Started USB recording: {filename}")
+                            
+                            with open(video_csv_path, "a", newline="") as f:
+                                csv.writer(f).writerow([datetime.now().isoformat(), execution_id, session_number, "USB", "started", filename])
+                                
+                        except Exception as e:
+                            logger.error(f"Failed to start USB recording: {e}")
+                            log_event("Error Event", "USB_Camera", f"Failed to write video: {e}")
+
+                if recording:
+                    if out: out.write(frame)
+                    
+                    # Strict 10-second absence stops the video immediately
+                    if not instant_presence and (current_time - usb_last_seen > 10.0):
+                        logger.info(f"Stopping USB recording: {filename}")
+                        if out: out.release()
+                        recording = False
+                        out = None
+                        log_event("Output Event", "USB_Camera_Recording_Off", "")
                         
-                        logger.info("Aborting Inter-Session Break due to departure.")
-                        log_event("Condition Event", "ISB_Timer_Aborted", "Subject Departed")
-                        log_event("Condition Event", "System_Ready_Next_Subject", "")
-                        
-                        # Full state reset for next monkey
+                        with open(video_csv_path, "a", newline="") as f:
+                            csv.writer(f).writerow([datetime.now().isoformat(), execution_id, session_number, "USB", "stopped", filename])
+                        filename = ""
+
+
+                # ==========================================
+                # PROCESS B: SESSION & CSI TRIGGER LOGIC
+                # ==========================================
+                
+                # EARLY TERMINATION CHECK 
+                if stgt_started:
+                    if not instant_presence:
+                        if session_absence_start == 0.0:
+                            session_absence_start = current_time
+                        elif current_time - session_absence_start >= absence_limit:
+                            logger.info(f"Subject absent for {absence_limit}s during active session. Terminating early.")
+                            log_event("Condition Event", "Session_Terminated_Early", f"{absence_limit}s_Absence")
+                            if stgt_process:
+                                stgt_process.terminate()
+                                stgt_process.wait()
+                            session_absence_start = 0.0
+                    else:
+                        session_absence_start = 0.0
+
+                # SESSION START (Modified to check disable_task_spawning)
+                if instant_presence and not stgt_started and not isb_active and not disable_task_spawning:
+                    session_number += 1
+                    current_temp = get_cpu_temp()
+                    
+                    log_event("Diagnostic Event", "CPU_Temperature_Log", f"{current_temp} (Session Start)")
+                    last_temp_log_time = current_time 
+
+                    log_event("Condition Event", "STGT_Subprocess_Start", session_number)
+                    log_event("Timer Event", "Session_Timer_Start", 0.0)
+
+                    cmd = [
+                        "/usr/bin/python3",
+                        "/home/capuchin/Desktop/stgt_scripts/stgt_task.py",
+                        "--execution_id", execution_id,
+                        "--session_number", str(session_number),
+                        "--phase", phase,
+                        "--max_trial", str(max_trial),
+                        "--lever_dur", str(lever_dur),
+                        "--buffer_dur", str(buffer_dur),
+                        "--hab_base", str(hab_base),
+                        "--hab_jitter", str(hab_jitter),
+                        "--data_csv_path", str(data_csv_path),
+                        "--t0", str(T0)
+                    ]
+                    if iti_list:
+                        cmd.append("--iti_list")
+                        cmd.extend([str(i) for i in iti_list])
+
+                    # Start Task Subprocess
+                    stgt_process = subprocess.Popen(cmd)
+                    stgt_started = True
+                    session_start_time = current_time
+
+                    # Start CSI cameras
+                    for i, cam_index in enumerate(csi_sources):
+                        timestamp_csi = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        filename_csi = f"{timestamp_csi}_csi_cam{i}.mp4"
+                        out_path_csi = record_dir / filename_csi
+                        try:
+                            proc = subprocess.Popen([
+                                "rpicam-vid", "-t", "0", "-n", "--inline",
+                                "--width", "640", "--height", "480", "--framerate", "15",
+                                "--camera", str(cam_index), "-o", str(out_path_csi)
+                            ])
+                            csi_outs[i] = proc
+                            csi_filenames[i] = filename_csi
+                            log_event("Output Event", f"CSI_Camera_{i}_Recording_On", filename_csi)
+                            logger.info(f"Started CSI camera {cam_index}: {filename_csi}")
+                            
+                            with open(video_csv_path, "a", newline="") as f:
+                                csv.writer(f).writerow([datetime.now().isoformat(), execution_id, session_number, f"CSI_{cam_index}", "started", filename_csi])
+                                
+                        except Exception as e:
+                            logger.error(f"Failed to start CSI camera {cam_index}: {e}")
+                            log_event("Error Event", f"CSI_Camera_{cam_index}", f"Failed to start: {e}")
+                            csi_outs[i] = None
+
+
+                # ==========================================
+                # SESSION COMPLETION & ISB INITIATION
+                # ==========================================
+                if stgt_started and stgt_process and stgt_process.poll() is not None:
+                    ret_code = stgt_process.poll()
+                    session_duration = round(current_time - session_start_time, 3)
+                    log_event("Timer Event", "Session_Timer_Elapsed", session_duration)
+                    
+                    current_temp = get_cpu_temp()
+                    log_event("Diagnostic Event", "CPU_Temperature_Log", f"{current_temp} (Session End)")
+                    last_temp_log_time = current_time 
+
+                    logger.info("STGT finished. Stopping CSI cameras.")
+                    for i, proc in enumerate(csi_outs):
+                        if proc:
+                            proc.send_signal(signal.SIGINT)
+                            proc.wait()
+                            log_event("Output Event", f"CSI_Camera_{i}_Recording_Off", "")
+                            
+                            with open(video_csv_path, "a", newline="") as f:
+                                csv.writer(f).writerow([datetime.now().isoformat(), execution_id, session_number, f"CSI_{csi_sources[i]}", "stopped", str(csi_filenames[i])])
+                    
+                    stgt_started = False
+                    csi_outs = [None] * len(csi_sources)
+                    session_absence_start = 0.0
+                    
+                    if ret_code == 0:
+                        # FULL COMPLETION: Start 4-Minute ISB
+                        log_event("Condition Event", "STGT_Subprocess_End", "Complete")
+                        logger.info("Session complete. Starting 4-minute Inter-Session Break.")
+                        isb_active = True
+                        isb_until = current_time + 240.0
+                        presence_timeout_start = 0 
+                        log_event("Condition Event", "Phase_Transition", "Inter_Session_Break")
+                        log_event("Timer Event", "ISB_Timer_Start", 240.0)
+                    else:
+                        # EARLY TERMINATION 
+                        log_event("Condition Event", "STGT_Subprocess_End", "Early_Termination")
+                        logger.info("Monkey might have left or task aborted. Skipping ISB. System primed.")
                         isb_active = False
-                        isb_until = 0
-                        presence_timeout_start = 0
                         session_subject_present = False
+                        presence_timeout_start = 0
 
-                if isb_active and current_time >= isb_until:
-                    logger.info("Inter-Session Break elapsed. Ready for next session.")
-                    log_event("Timer Event", "ISB_Timer_Elapsed", 240.0)
-                    isb_active = False
 
-            time.sleep(0.005)
+                # ==========================================
+                # ISB 30-SECOND DEPARTURE TRACKING
+                # ==========================================
+                if isb_active:
+                    if instant_presence:
+                        if presence_timeout_start != 0:
+                            logger.info("Subject returned before timeout elapsed. Cancelling timeout.")
+                            log_event("Condition Event", "Presence_Timeout_Cancelled", "Subject Returned")
+                            presence_timeout_start = 0 
+                    else:
+                        if presence_timeout_start == 0:
+                            presence_timeout_start = current_time
+                            log_event("Variable Event", "YOLO_Detection_Ratio", round(ratio, 2))
+                            log_event("Condition Event", "Presence_Timeout_Begin", 30.0)
+                        elif current_time - presence_timeout_start >= 30.0:
+                            logger.info("Subject departed. 30-second presence timeout elapsed.")
+                            log_event("Timer Event", "Presence_Timeout_Elapsed", 30.0)
+                            log_event("Variable Event", "Subject_Present_Flag", 0)
+                            log_event("Variable Event", "Face_Detection", 0)
+                            log_event("Variable Event", "Station_Active", 0)
+                            
+                            logger.info("Aborting Inter-Session Break due to departure.")
+                            log_event("Condition Event", "ISB_Timer_Aborted", "Subject Departed")
+                            log_event("Condition Event", "System_Ready_Next_Subject", "")
+                            
+                            # Full state reset for next monkey
+                            isb_active = False
+                            isb_until = 0
+                            presence_timeout_start = 0
+                            session_subject_present = False
+
+                    if isb_active and current_time >= isb_until:
+                        logger.info("Inter-Session Break elapsed. Ready for next session.")
+                        log_event("Timer Event", "ISB_Timer_Elapsed", 240.0)
+                        isb_active = False
+
+                time.sleep(0.005)
+
+            except KeyboardInterrupt:
+                print("\n")
+                logger.info("Task interruption requested by user.")
+                choice = input("Do you wish to keep the webcam face detection and recording process running? (y/n): ").strip().lower()
+                if choice == 'y':
+                    logger.info("Deactivating future STGT/habituation tasks. Webcam tracking will remain active.")
+                    log_event("System Event", "Execution_State", "Task aborted, webcam continued")
+                    disable_task_spawning = True
+                    if stgt_process:
+                        stgt_process.terminate()
+                        # STGT process will be evaluated by the 'SESSION COMPLETION' block on the next loop iteration,
+                        # gracefully terminating CSI cameras and correctly logging the early termination.
+                    continue
+                else:
+                    raise  # Re-raise exception to initiate standard full shutdown
 
     except KeyboardInterrupt:
-        logger.info("Interrupted by user")
+        logger.info("Interrupted by user. Shutting down entirely.")
         log_event("System Event", "Execution", "Interrupted by user")
     finally:
         if out: out.release()
