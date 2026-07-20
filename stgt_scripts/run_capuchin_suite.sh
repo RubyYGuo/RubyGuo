@@ -45,8 +45,30 @@ conda activate capuchinyolo26
 # Run integrated YOLO + STGT controller
 cd /home/capuchin/Desktop/stgt_scripts
 
-# Run the hardware testing phase
-python3 stgt_io_test.py
+# Wrap the testing and master scripts in a loop
+while true; do
+    echo "Starting Hardware IO Test..."
+    # Run the hardware testing phase
+    python3 stgt_io_test.py
 
-#Run task script
-python3 -i stgt_master_script.py --weights best.pt --img 256 --csi 0 1
+    echo "Hardware test complete. Launching Master Script..."
+    # Run task script
+    python3 -i stgt_master_script.py --weights best.pt --img 256 --csi 0 1
+    
+    # Capture the exit code of stgt_master_script.py
+    EXIT_CODE=$?
+
+    # Check if the user selected "Return to Hardware IO Test" (Exit Code 99)
+    if [ $EXIT_CODE -eq 99 ]; then
+        echo ""
+        echo "================================================="
+        echo "Returning to Hardware Testing Phase as requested..."
+        echo "================================================="
+        echo ""
+        continue # Restart the loop from the top
+    else
+        # Break the loop if finished normally or crashed
+        echo "Master script finished. Exiting pipeline."
+        break
+    fi
+done
