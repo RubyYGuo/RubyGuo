@@ -112,8 +112,8 @@ def configure_schedule():
             phase = "habituation"
             break
         elif choice == '3':
-            logger.info("Returning to Hardware Test")
-            sys.exit(99) # This triggers the bash script to restart the loop
+            logger.info("Returning to Hardware IO Test phase...")
+            os._exit(99) # Using hard kill to bypass interactive mode hook
         elif choice == '4':
             logger.info("System closed by user at configuration menu.")
             sys.exit(0)
@@ -255,6 +255,8 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
     # STRUCTURAL MODIFICATION: Frame decimation variables
     frame_counter = 0
     instant_presence = False
+    face_detected = False
+    beam_broken = False
     ratio = 0.0
     disable_task_spawning = False  # Allows camera persistence on abort
 
@@ -290,6 +292,8 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                     
                     face_detected = (ratio >= 0.50)
                     beam_broken = (GPIO.input(FOODCUP_BEAM_PIN) == GPIO.LOW)
+                    
+                    # Both are valid for task presence
                     instant_presence = (face_detected or beam_broken)
 
                 # Log official session arrival
@@ -304,7 +308,8 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                 # ==========================================
                 # PROCESS A: INDEPENDENT USB RECORDING
                 # ==========================================
-                if instant_presence:
+                # Video is now strictly triggered by visual face detection
+                if face_detected:
                     usb_last_seen = current_time
                     if not recording:
                         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -326,8 +331,8 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                 if recording:
                     if out: out.write(frame)
 
-                    # Strict 10-second absence stops the video immediately
-                    if not instant_presence and (current_time - usb_last_seen > 10.0):
+                    # Strict 10-second absence of FACE stops the video immediately
+                    if not face_detected and (current_time - usb_last_seen > 10.0):
                         logger.info(f"Stopping USB recording: {filename}")
                         if out: out.release()
                         recording = False
@@ -345,6 +350,7 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
 
                 # EARLY TERMINATION CHECK 
                 if stgt_started:
+                    # Session only aborts if neither face nor beam is present for 90s
                     if not instant_presence:
                         if session_absence_start == 0.0:
                             session_absence_start = current_time
