@@ -62,6 +62,7 @@ def sigterm_handler(signum, frame):
     raise KeyboardInterrupt
 
 signal.signal(signal.SIGTERM, sigterm_handler)
+signal.signal(signal.SIGINT, signal.SIG_IGN)
 
 # =========================
 # Data Logging Helper
@@ -81,7 +82,7 @@ relay_lv_out = 19
 lv_press_pin = 13
 relay_cue_light = 12
 relay_dispenser = 22
-foodcup_beam_pin = 21
+foodcup_beam_pin = 21  # RESTORED
 
 GPIO.setmode(GPIO.BCM)
 try:
@@ -89,6 +90,7 @@ try:
     GPIO.setup(relay_cue_light, GPIO.OUT)
     GPIO.setup(relay_dispenser, GPIO.OUT)
     GPIO.setup(lv_press_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+    GPIO.setup(foodcup_beam_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)  # RESTORED
 
     GPIO.output(relay_lv_out, True)
     GPIO.output(relay_dispenser, True)
@@ -111,28 +113,32 @@ inactivity_limit = 30.0 if phase_arg == "habituation" else 90.0
 last_foodcup_state = GPIO.HIGH
 
 def poll_foodcup():
+    """Restored software polling for Pin 21 inside the subprocess trials"""
     global last_foodcup_state, session_foodcup_cs_entries, session_foodcup_iti_entries, last_interaction_time
-    current_state = GPIO.input(foodcup_beam_pin)
-    
-    if last_foodcup_state == GPIO.HIGH and current_state == GPIO.LOW:  
-        last_interaction_time = time.time() 
-        log_event("Input Event", "Foodcup_Beam_Broken")
-        logger.info("Foodcup beam broken (Entry)")
-        log_event("Condition Event", "Foodcup_Entry")
+    try:
+        current_state = GPIO.input(foodcup_beam_pin)
         
-        if phase == "lever":
-            session_foodcup_cs_entries += 1
-            log_event("Variable Event", "Session_Foodcup_CS_Entries", session_foodcup_cs_entries)
-            logger.info(f"Foodcup entry completed (CS Phase). Total: {session_foodcup_cs_entries}")
-        elif phase in ["iti", "habituation", "buffer"]:
-            session_foodcup_iti_entries += 1
-            log_event("Variable Event", "Session_Foodcup_ITI_Entries", session_foodcup_iti_entries)
-            logger.info(f"Foodcup entry completed ({phase} Phase). Total: {session_foodcup_iti_entries}")
+        if last_foodcup_state == GPIO.HIGH and current_state == GPIO.LOW:  
+            last_interaction_time = time.time() 
+            log_event("Input Event", "Foodcup_Beam_Broken")
+            logger.info("Foodcup beam broken (Entry)")
+            log_event("Condition Event", "Foodcup_Entry")
             
-    elif last_foodcup_state == GPIO.LOW and current_state == GPIO.HIGH:  
-        log_event("Input Event", "Foodcup_Beam_Restored")
+            if phase == "lever":
+                session_foodcup_cs_entries += 1
+                log_event("Variable Event", "Session_Foodcup_CS_Entries", session_foodcup_cs_entries)
+                logger.info(f"Foodcup entry completed (CS Phase). Total: {session_foodcup_cs_entries}")
+            elif phase in ["iti", "habituation", "buffer"]:
+                session_foodcup_iti_entries += 1
+                log_event("Variable Event", "Session_Foodcup_ITI_Entries", session_foodcup_iti_entries)
+                logger.info(f"Foodcup entry completed ({phase} Phase). Total: {session_foodcup_iti_entries}")
+                
+        elif last_foodcup_state == GPIO.LOW and current_state == GPIO.HIGH:  
+            log_event("Input Event", "Foodcup_Beam_Restored")
 
-    last_foodcup_state = current_state
+        last_foodcup_state = current_state
+    except Exception:
+        pass
 
 def check_inactivity():
     return (time.time() - last_interaction_time) > inactivity_limit
@@ -140,7 +146,7 @@ def check_inactivity():
 def wait_with_inactivity_check(duration):
     t_start = time.time()
     while time.time() - t_start < duration:
-        poll_foodcup() 
+        poll_foodcup() # Poll the food cup continuously
         if check_inactivity():
             return True
         time.sleep(0.01)
@@ -151,6 +157,8 @@ def wait_with_inactivity_check(duration):
 # =========================
 try:
     logger.info(f"STGT Subprocess {session_number} Initialized. Mode: {phase_arg}")
+    
+    last_interaction_time = time.time()
     
     log_event("Variable Event", "Session_Counter", session_number)
     log_event("Variable Event", "Trial_Counter", 0)
@@ -218,7 +226,7 @@ try:
                 last_state = GPIO.input(lv_press_pin)
 
                 while time.time() - start_time < lever_dur:
-                    poll_foodcup() 
+                    poll_foodcup() # Poll the food cup during lever phase
                     if check_inactivity():
                         early_exit = True
                         break
