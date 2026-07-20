@@ -100,7 +100,7 @@ except Exception as e:
     sys.exit(1)
 
 # =========================
-# GLOBALS & CALLBACKS
+# GLOBALS & POLLING LOGIC
 # =========================
 phase = "idle"
 session_lever_counts = 0
@@ -109,14 +109,14 @@ session_foodcup_iti_entries = 0
 
 last_interaction_time = time.time()
 inactivity_limit = 30.0 if phase_arg == "habituation" else 90.0
+last_foodcup_state = GPIO.HIGH
 
-def foodcup_callback(channel):
-    global session_foodcup_cs_entries, session_foodcup_iti_entries, last_interaction_time
-    state = GPIO.input(foodcup_beam_pin)
+def poll_foodcup():
+    global last_foodcup_state, session_foodcup_cs_entries, session_foodcup_iti_entries, last_interaction_time
+    current_state = GPIO.input(foodcup_beam_pin)
     
-    last_interaction_time = time.time() 
-    
-    if state == GPIO.LOW:  
+    if last_foodcup_state == GPIO.HIGH and current_state == GPIO.LOW:  
+        last_interaction_time = time.time() 
         log_event("Input Event", "Foodcup_Beam_Broken")
         logger.info("Foodcup beam broken (Entry)")
         log_event("Condition Event", "Foodcup_Entry")
@@ -125,15 +125,15 @@ def foodcup_callback(channel):
             session_foodcup_cs_entries += 1
             log_event("Variable Event", "Session_Foodcup_CS_Entries", session_foodcup_cs_entries)
             logger.info(f"Foodcup entry completed (CS Phase). Total: {session_foodcup_cs_entries}")
-        elif phase == "iti" or phase == "habituation":
+        elif phase in ["iti", "habituation", "buffer"]:
             session_foodcup_iti_entries += 1
             log_event("Variable Event", "Session_Foodcup_ITI_Entries", session_foodcup_iti_entries)
             logger.info(f"Foodcup entry completed ({phase} Phase). Total: {session_foodcup_iti_entries}")
             
-    else:  
+    elif last_foodcup_state == GPIO.LOW and current_state == GPIO.HIGH:  
         log_event("Input Event", "Foodcup_Beam_Restored")
 
-GPIO.add_event_detect(foodcup_beam_pin, GPIO.BOTH, callback=foodcup_callback, bouncetime=100)
+    last_foodcup_state = current_state
 
 def check_inactivity():
     return (time.time() - last_interaction_time) > inactivity_limit
@@ -141,6 +141,7 @@ def check_inactivity():
 def wait_with_inactivity_check(duration):
     t_start = time.time()
     while time.time() - t_start < duration:
+        poll_foodcup() 
         if check_inactivity():
             return True
         time.sleep(0.01)
@@ -158,7 +159,6 @@ try:
     log_event("Variable Event", "Session_Foodcup_CS_Entries", 0)
     log_event("Variable Event", "Session_Foodcup_ITI_Entries", 0)
 
-    # ----- PRE-TRIAL BUFFER -----
     log_event("Condition Event", "Phase_Transition", "Pre_Trial_Buffer")
     phase = "buffer"
     log_event("Variable Event", "Task_Phase_State", "buffer")
@@ -172,7 +172,6 @@ try:
     else:
         log_event("Timer Event", "Buffer_Timer", round(buffer_dur, 3))
 
-    # ----- TRIAL LOOP -----
     if not early_exit:
         for trial_n in range(max_trial):
             logger.info(f"Starting Trial {trial_n + 1}")
@@ -183,7 +182,6 @@ try:
                 phase = "habituation"
                 log_event("Variable Event", "Task_Phase_State", "habituation")
                 
-                # Immediate Reward
                 log_event("Condition Event", "Phase_Transition", "Reward_Dispense")
                 GPIO.output(relay_dispenser, False)
                 log_event("Pulse Output Event", "Dispenser", 0.01)
@@ -191,7 +189,6 @@ try:
                 GPIO.output(relay_dispenser, True)
                 logger.info("Dispensing reward (Habituation)")
                 
-                # Dynamic interval calculation
                 trial_interval = random.uniform(hab_base - hab_jitter, hab_base + hab_jitter)
                 log_event("Variable Event", "Habituation_Interval", round(trial_interval, 3))
                 logger.info(f"Habituation interval started. Scheduled duration: {trial_interval:.2f}s")
@@ -204,11 +201,10 @@ try:
                 
             elif phase_arg == "task":
                 if not iti_list:
-                    iti_list = [12.0] # Fallback protection
+                    iti_list = [12.0] 
                 trial_iti = random.choice(iti_list)
                 log_event("Variable Event", "ITI_Value", round(trial_iti, 3))
 
-                # ----- CS (LEVER) PHASE -----
                 log_event("Condition Event", "Phase_Transition", "CS_Active")
                 phase = "lever"
                 log_event("Variable Event", "Task_Phase_State", "lever")
@@ -223,6 +219,7 @@ try:
                 last_state = GPIO.input(lv_press_pin)
 
                 while time.time() - start_time < lever_dur:
+                    poll_foodcup() 
                     if check_inactivity():
                         early_exit = True
                         break
@@ -249,7 +246,6 @@ try:
                     
                 log_event("Timer Event", "CS_Timer", round(lever_dur, 3))
 
-                # ----- REWARD PHASE -----
                 log_event("Condition Event", "Phase_Transition", "Reward_Dispense")
                 
                 GPIO.output(relay_lv_out, True)
@@ -263,7 +259,6 @@ try:
                 GPIO.output(relay_dispenser, True)
                 logger.info("Dispensing reward (Dispenser pulsed)")
 
-                # ----- ITI PHASE -----
                 log_event("Condition Event", "Phase_Transition", "ITI_Active")
                 phase = "iti"
                 log_event("Variable Event", "Task_Phase_State", "iti")
