@@ -108,10 +108,10 @@ def configure_schedule():
 
     # Default parameters shared or specific
     max_trial = 12
-    buffer_dur = 5.0
-    hab_base = 5.0
-    hab_jitter = 1.0
-    lever_dur = 4.0
+    buffer_dur = 0
+    hab_base = 7
+    hab_jitter = 2
+    lever_dur = 4
     iti_list = []
     
     def generate_iti_list(start, end, step):
@@ -196,13 +196,13 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
     last_temp_log_time = time.time()
     
     # Establish conditional absence threshold
-    absence_limit = 30.0 if phase == "habituation" else 90.0
+    absence_limit = 90.0
 
     # CSI state
     csi_outs = [None] * len(csi_sources)
     csi_start_times = [None] * len(csi_sources)
     csi_filenames = [None] * len(csi_sources)
-    detection_window = deque(maxlen=30)
+    detection_window = deque(maxlen=10)
 
     logger.info("Loading YOLO model...")
     model = YOLO(weights)
@@ -224,6 +224,9 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
         log_event("Error Event", "USB_Camera", "Failed to open")
         return
 
+    # STRUCTURAL MODIFICATION: Limit hardware acquisition framerate
+    cap.set(cv2.CAP_PROP_FPS, 15)
+
     FRAME_WIDTH = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     FRAME_HEIGHT = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     time_deque = deque(maxlen=30)
@@ -235,6 +238,11 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
     logger.info("Starting detection loop...")
     log_event("System Event", "Detection_Loop", "Started")
 
+    # STRUCTURAL MODIFICATION: Frame decimation variables
+    frame_counter = 0
+    instant_presence = False
+    ratio = 0.0
+
     try:
         while True:
             current_time = time.time()
@@ -243,6 +251,7 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                 time.sleep(0.05)
                 continue
 
+            frame_counter += 1
             time_deque.append(current_time)
             estimated_fps = estimate_fps(time_deque)
 
@@ -255,22 +264,23 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                 last_temp_log_time = current_time
 
             # ==========================================
-            # GLOBAL YOLO DETECTION (Runs Every Frame)
+            # GLOBAL YOLO DETECTION (Decimated Frame Processing)
             # ==========================================
-            results = model(frame, imgsz=img_size, conf=conf_thres, iou=0.4, verbose=False)
-            raw_detection = len(results[0].boxes) > 0
-            detection_window.append(1 if raw_detection else 0)
-            ratio = sum(detection_window) / len(detection_window) if len(detection_window) > 0 else 0
-            
-            instant_presence = (ratio >= 0.50)
+            if frame_counter % 6 == 0:
+                results = model(frame, imgsz=img_size, conf=conf_thres, iou=0.4, verbose=False)
+                raw_detection = len(results[0].boxes) > 0
+                detection_window.append(1 if raw_detection else 0)
+                ratio = sum(detection_window) / len(detection_window) if len(detection_window) > 0 else 0
+                
+                instant_presence = (ratio >= 0.50)
 
-            # Log official session arrival
-            if instant_presence and not session_subject_present:
-                session_subject_present = True
-                log_event("Variable Event", "YOLO_Detection_Ratio", round(ratio, 2))
-                log_event("Variable Event", "Subject_Present_Flag", 1)
-                log_event("Variable Event", "Face_Detection", 1)
-                log_event("Variable Event", "Station_Active", 1)
+                # Log official session arrival
+                if instant_presence and not session_subject_present:
+                    session_subject_present = True
+                    log_event("Variable Event", "YOLO_Detection_Ratio", round(ratio, 2))
+                    log_event("Variable Event", "Subject_Present_Flag", 1)
+                    log_event("Variable Event", "Face_Detection", 1)
+                    log_event("Variable Event", "Station_Active", 1)
 
 
             # ==========================================
@@ -280,7 +290,7 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                 usb_last_seen = current_time
                 if not recording:
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    filename = f"capuchin_{timestamp}.mp4"
+                    filename = f"{timestamp}_FRONT_capuchin.mp4"
                     out_path = record_dir / filename
                     try:
                         out = cv2.VideoWriter(str(out_path), cv2.VideoWriter_fourcc(*'mp4v'), estimated_fps, (FRAME_WIDTH, FRAME_HEIGHT))
@@ -367,7 +377,7 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                 # Start CSI cameras
                 for i, cam_index in enumerate(csi_sources):
                     timestamp_csi = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    filename_csi = f"csi_cam{i}_{timestamp_csi}.mp4"
+                    filename_csi = f"{timestamp_csi}_csi_cam{i}.mp4"
                     out_path_csi = record_dir / filename_csi
                     try:
                         proc = subprocess.Popen([
@@ -427,7 +437,7 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                 else:
                     # EARLY TERMINATION 
                     log_event("Condition Event", "STGT_Subprocess_End", "Early_Termination")
-                    logger.info("Session ended early. Skipping ISB. System primed for new arrival.")
+                    logger.info("Monkey might have left. Skipping ISB. System primed for new arrival.")
                     isb_active = False
                     session_subject_present = False
                     presence_timeout_start = 0
