@@ -15,7 +15,17 @@ from collections import deque
 import subprocess
 import signal
 from ultralytics import YOLO
+import RPi.GPIO as GPIO
 
+# =========================
+# Hardware IO Setup
+# =========================
+FOODCUP_BEAM_PIN = 21  # Matched to your subprocess wiring
+
+# Set mode (this is safe to call in multiple scripts)
+GPIO.setmode(GPIO.BCM)
+# Set up the beam pin with a pull-up resistor
+GPIO.setup(FOODCUP_BEAM_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 # =========================
 # Setup & Initialization
 # =========================
@@ -271,19 +281,31 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
             # GLOBAL YOLO DETECTION (Decimated Frame Processing)
             # ==========================================
             if frame_counter % 6 == 0:
+                # 1. Update YOLO Face Detection Ratio
                 results = model(frame, imgsz=img_size, conf=conf_thres, iou=0.4, verbose=False)
                 raw_detection = len(results[0].boxes) > 0
                 detection_window.append(1 if raw_detection else 0)
                 ratio = sum(detection_window) / len(detection_window) if len(detection_window) > 0 else 0
                 
-                instant_presence = (ratio >= 0.50)
+                # 2. Evaluate Both Triggers
+                face_detected = (ratio >= 0.50)
+                beam_broken = (GPIO.input(FOODCUP_BEAM_PIN) == GPIO.LOW)
+                
+                # 3. Combine with OR Logic
+                instant_presence = (face_detected or beam_broken)
 
-                # Log official session arrival
+                # 4. Log official session arrival
                 if instant_presence and not session_subject_present:
                     session_subject_present = True
+                    
+                    # Optional: Log what actually triggered the start (Face, Beam, or Both)
+                    trigger_source = "Both" if (face_detected and beam_broken) else ("Face" if face_detected else "Beam")
+                    log_event("Variable Event", "Trigger_Source", trigger_source)
+                    
+                    # Original logging preserved for your downstream data analysis
                     log_event("Variable Event", "YOLO_Detection_Ratio", round(ratio, 2))
                     log_event("Variable Event", "Subject_Present_Flag", 1)
-                    log_event("Variable Event", "Face_Detection", 1)
+                    log_event("Variable Event", "Face_Detection", 1 if face_detected else 0) 
                     log_event("Variable Event", "Station_Active", 1)
 
 
@@ -491,6 +513,10 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
     finally:
         if out: out.release()
         cap.release()
+        # ONLY clean up the pin the master script is using
+        # A blank GPIO.cleanup() here would crash the subprocess hardware
+        GPIO.cleanup(FOODCUP_BEAM_PIN)
+        
         for proc in csi_outs:
             if proc:
                 proc.send_signal(signal.SIGINT)
