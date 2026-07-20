@@ -17,20 +17,26 @@ import signal
 parser = argparse.ArgumentParser()
 parser.add_argument("--execution_id", type=str)
 parser.add_argument("--session_number", type=int, default=1)
+parser.add_argument("--phase", type=str, default="task", choices=["task", "habituation"])
 parser.add_argument("--max_trial", type=int, default=12)
 parser.add_argument("--lever_dur", type=float, default=4.0)
-parser.add_argument("--iti_list", type=float, nargs='+', default=[12.0, 15.0, 18.0, 21.0, 24.0])
+parser.add_argument("--iti_list", type=float, nargs='*', default=[])
 parser.add_argument("--buffer_dur", type=float, default=5.0)
+parser.add_argument("--hab_base", type=float, default=5.0)
+parser.add_argument("--hab_jitter", type=float, default=1.0)
 parser.add_argument("--data_csv_path", type=str, required=True)
 parser.add_argument("--t0", type=float, required=True)
 args = parser.parse_args()
 
 execution_id = args.execution_id
 session_number = args.session_number
+phase_arg = args.phase
 max_trial = args.max_trial
 lever_dur = args.lever_dur
 iti_list = args.iti_list
 buffer_dur = args.buffer_dur
+hab_base = args.hab_base
+hab_jitter = args.hab_jitter
 data_csv_path = args.data_csv_path
 t0 = args.t0
 
@@ -51,7 +57,6 @@ logger = logging.getLogger(__name__)
 # =========================
 # Signal Handler
 # =========================
-# Ensures that if master.py kills this script mid-trial, it triggers the finally block
 def sigterm_handler(signum, frame):
     logger.info("Received termination signal from Master. Aborting session.")
     raise KeyboardInterrupt
@@ -83,7 +88,6 @@ try:
     GPIO.setup(relay_lv_out, GPIO.OUT)
     GPIO.setup(relay_cue_light, GPIO.OUT)
     GPIO.setup(relay_dispenser, GPIO.OUT)
-    # Using BOTH to capture Foodcup On and Off
     GPIO.setup(lv_press_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
     GPIO.setup(foodcup_beam_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 
@@ -103,16 +107,16 @@ session_lever_counts = 0
 session_foodcup_cs_entries = 0
 session_foodcup_iti_entries = 0
 
-# Track inactivity
 last_interaction_time = time.time()
+inactivity_limit = 30.0 if phase_arg == "habituation" else 90.0
 
 def foodcup_callback(channel):
     global session_foodcup_cs_entries, session_foodcup_iti_entries, last_interaction_time
     state = GPIO.input(foodcup_beam_pin)
     
-    last_interaction_time = time.time() # Update interaction time
+    last_interaction_time = time.time() 
     
-    if state == GPIO.LOW:  # Beam Broken
+    if state == GPIO.LOW:  
         log_event("Input Event", "Foodcup_Beam_Broken")
         logger.info("Foodcup beam broken (Entry)")
         log_event("Condition Event", "Foodcup_Entry")
@@ -121,22 +125,20 @@ def foodcup_callback(channel):
             session_foodcup_cs_entries += 1
             log_event("Variable Event", "Session_Foodcup_CS_Entries", session_foodcup_cs_entries)
             logger.info(f"Foodcup entry completed (CS Phase). Total: {session_foodcup_cs_entries}")
-        elif phase == "iti":
+        elif phase == "iti" or phase == "habituation":
             session_foodcup_iti_entries += 1
             log_event("Variable Event", "Session_Foodcup_ITI_Entries", session_foodcup_iti_entries)
-            logger.info(f"Foodcup entry completed (ITI Phase). Total: {session_foodcup_iti_entries}")
+            logger.info(f"Foodcup entry completed ({phase} Phase). Total: {session_foodcup_iti_entries}")
             
-    else:  # Beam Restored
+    else:  
         log_event("Input Event", "Foodcup_Beam_Restored")
 
 GPIO.add_event_detect(foodcup_beam_pin, GPIO.BOTH, callback=foodcup_callback, bouncetime=100)
 
 def check_inactivity():
-    """Returns True if it has been > 90 seconds since last lever or foodcup interaction."""
-    return (time.time() - last_interaction_time) > 90.0
+    return (time.time() - last_interaction_time) > inactivity_limit
 
 def wait_with_inactivity_check(duration):
-    """Sleeps for 'duration', returning True if the 90s inactivity limit is hit."""
     t_start = time.time()
     while time.time() - t_start < duration:
         if check_inactivity():
@@ -148,9 +150,8 @@ def wait_with_inactivity_check(duration):
 # MAIN SESSION LOGIC
 # =========================
 try:
-    logger.info(f"STGT Subprocess {session_number} Initialized")
+    logger.info(f"STGT Subprocess {session_number} Initialized. Mode: {phase_arg}")
     
-    # Session Resets
     log_event("Variable Event", "Session_Counter", session_number)
     log_event("Variable Event", "Trial_Counter", 0)
     log_event("Variable Event", "Session_Lever_Counts", 0)
@@ -178,88 +179,112 @@ try:
             log_event("Condition Event", "Phase_Transition", "Trial_Start")
             log_event("Variable Event", "Trial_Counter", trial_n + 1)
             
-            trial_iti = random.choice(iti_list)
-            log_event("Variable Event", "ITI_Value", round(trial_iti, 3))
-
-            # ----- CS (LEVER) PHASE -----
-            log_event("Condition Event", "Phase_Transition", "CS_Active")
-            phase = "lever"
-            log_event("Variable Event", "Task_Phase_State", "lever")
-            
-            GPIO.output(relay_lv_out, False)
-            GPIO.output(relay_cue_light, False)
-            log_event("Output Event", "Lever_Extend_On")
-            log_event("Output Event", "Cue_Light_On")
-            logger.info("Lever extended, Cue Light on")
-            
-            start_time = time.time()
-            last_state = GPIO.input(lv_press_pin)
-
-            # Polling for Lever (Allows On & Off capture during CS window)
-            while time.time() - start_time < lever_dur:
-                if check_inactivity():
+            if phase_arg == "habituation":
+                phase = "habituation"
+                log_event("Variable Event", "Task_Phase_State", "habituation")
+                
+                # Immediate Reward
+                log_event("Condition Event", "Phase_Transition", "Reward_Dispense")
+                GPIO.output(relay_dispenser, False)
+                log_event("Pulse Output Event", "Dispenser", 0.01)
+                time.sleep(0.01)
+                GPIO.output(relay_dispenser, True)
+                logger.info("Dispensing reward (Habituation)")
+                
+                # Dynamic interval calculation
+                trial_interval = random.uniform(hab_base - hab_jitter, hab_base + hab_jitter)
+                log_event("Variable Event", "Habituation_Interval", round(trial_interval, 3))
+                logger.info(f"Habituation interval started. Scheduled duration: {trial_interval:.2f}s")
+                
+                if wait_with_inactivity_check(trial_interval):
                     early_exit = True
                     break
-                
-                current_state = GPIO.input(lv_press_pin)
-                if last_state == GPIO.HIGH and current_state == GPIO.LOW:
-                    last_interaction_time = time.time() # Update interaction time
-                    log_event("Input Event", "Lever_Press_On")
-                    logger.info("Lever pressed down")
                     
-                    log_event("Condition Event", "Lever_Pressed")
-                    session_lever_counts += 1
-                    log_event("Variable Event", "Session_Lever_Counts", session_lever_counts)
-                    logger.info(f"Lever released and counted. Total: {session_lever_counts}")
+                log_event("Timer Event", "Habituation_Timer", round(trial_interval, 3))
+                
+            elif phase_arg == "task":
+                if not iti_list:
+                    iti_list = [12.0] # Fallback protection
+                trial_iti = random.choice(iti_list)
+                log_event("Variable Event", "ITI_Value", round(trial_iti, 3))
+
+                # ----- CS (LEVER) PHASE -----
+                log_event("Condition Event", "Phase_Transition", "CS_Active")
+                phase = "lever"
+                log_event("Variable Event", "Task_Phase_State", "lever")
+                
+                GPIO.output(relay_lv_out, False)
+                GPIO.output(relay_cue_light, False)
+                log_event("Output Event", "Lever_Extend_On")
+                log_event("Output Event", "Cue_Light_On")
+                logger.info("Lever extended, Cue Light on")
+                
+                start_time = time.time()
+                last_state = GPIO.input(lv_press_pin)
+
+                while time.time() - start_time < lever_dur:
+                    if check_inactivity():
+                        early_exit = True
+                        break
                     
-                elif last_state == GPIO.LOW and current_state == GPIO.HIGH:
-                    log_event("Input Event", "Lever_Press_Off")
-                                
-                last_state = current_state
-                time.sleep(0.01) 
+                    current_state = GPIO.input(lv_press_pin)
+                    if last_state == GPIO.HIGH and current_state == GPIO.LOW:
+                        last_interaction_time = time.time() 
+                        log_event("Input Event", "Lever_Press_On")
+                        logger.info("Lever pressed down")
+                        
+                        log_event("Condition Event", "Lever_Pressed")
+                        session_lever_counts += 1
+                        log_event("Variable Event", "Session_Lever_Counts", session_lever_counts)
+                        logger.info(f"Lever released and counted. Total: {session_lever_counts}")
+                        
+                    elif last_state == GPIO.LOW and current_state == GPIO.HIGH:
+                        log_event("Input Event", "Lever_Press_Off")
+                                        
+                    last_state = current_state
+                    time.sleep(0.01) 
 
-            if early_exit:
-                break
+                if early_exit:
+                    break
+                    
+                log_event("Timer Event", "CS_Timer", round(lever_dur, 3))
+
+                # ----- REWARD PHASE -----
+                log_event("Condition Event", "Phase_Transition", "Reward_Dispense")
                 
-            log_event("Timer Event", "CS_Timer", round(lever_dur, 3))
+                GPIO.output(relay_lv_out, True)
+                GPIO.output(relay_cue_light, True)
+                log_event("Output Event", "Lever_Extend_Off")
+                log_event("Output Event", "Cue_Light_Off")
 
-            # ----- REWARD PHASE -----
-            log_event("Condition Event", "Phase_Transition", "Reward_Dispense")
-            
-            GPIO.output(relay_lv_out, True)
-            GPIO.output(relay_cue_light, True)
-            log_event("Output Event", "Lever_Extend_Off")
-            log_event("Output Event", "Cue_Light_Off")
+                GPIO.output(relay_dispenser, False)
+                log_event("Pulse Output Event", "Dispenser", 0.01)
+                time.sleep(0.01)
+                GPIO.output(relay_dispenser, True)
+                logger.info("Dispensing reward (Dispenser pulsed)")
 
-            # Pulse Dispenser
-            GPIO.output(relay_dispenser, False)
-            log_event("Pulse Output Event", "Dispenser", 0.01)
-            time.sleep(0.01)
-            GPIO.output(relay_dispenser, True)
-            logger.info("Dispensing reward (Dispenser pulsed)")
-
-            # ----- ITI PHASE -----
-            log_event("Condition Event", "Phase_Transition", "ITI_Active")
-            phase = "iti"
-            log_event("Variable Event", "Task_Phase_State", "iti")
-            
-            logger.info(f"ITI phase started. Scheduled duration: {trial_iti:.2f}s")
-            
-            if wait_with_inactivity_check(trial_iti):
-                early_exit = True
-                break
+                # ----- ITI PHASE -----
+                log_event("Condition Event", "Phase_Transition", "ITI_Active")
+                phase = "iti"
+                log_event("Variable Event", "Task_Phase_State", "iti")
                 
-            log_event("Timer Event", "ITI_Timer", round(trial_iti, 3))
-            
+                logger.info(f"ITI phase started. Scheduled duration: {trial_iti:.2f}s")
+                
+                if wait_with_inactivity_check(trial_iti):
+                    early_exit = True
+                    break
+                    
+                log_event("Timer Event", "ITI_Timer", round(trial_iti, 3))
+                
             logger.info(f"Trial {trial_n + 1} completed")
 
     if early_exit:
-        log_event("Condition Event", "Session_End", "Early_Termination_90s_Inactivity")
-        logger.info("Session terminating early due to 90s of inactivity.")
-        sys.exit(2) # Code 2 notifies master to skip the ISB
+        log_event("Condition Event", "Session_End", f"Early_Termination_{inactivity_limit}s_Inactivity")
+        logger.info(f"Session terminating early due to {inactivity_limit}s of inactivity.")
+        sys.exit(2) 
     else:
         log_event("Condition Event", "Session_End", "Complete")
-        sys.exit(0) # Code 0 = Full completion
+        sys.exit(0) 
 
 except KeyboardInterrupt:
     logger.info("STGT subprocess interrupted by user")
@@ -269,8 +294,6 @@ finally:
     phase = "idle"
     log_event("Variable Event", "Task_Phase_State", "idle")
     
-    # EXPLICIT HARDWARE RESET
-    # Ensures all relays turn off (assuming True = off) regardless of crash or master termination
     try:
         GPIO.output(relay_lv_out, True)
         GPIO.output(relay_cue_light, True)
