@@ -91,8 +91,9 @@ def configure_schedule():
         print("\nSelect Operating Mode:")
         print("1) Run ST/GT Task")
         print("2) Run Habituation")
-        print("3) Exit")
-        choice = input("Enter choice (1-3): ").strip()
+        print("3) Return to Hardware IO Test")
+        print("4) Exit")
+        choice = input("Enter choice (1-4): ").strip()
         
         if choice == '1':
             phase = "task"
@@ -101,10 +102,13 @@ def configure_schedule():
             phase = "habituation"
             break
         elif choice == '3':
+            logger.info("Returning to Hardware IO Test phase...")
+            sys.exit(99) # This triggers the bash script to restart the loop
+        elif choice == '4':
             logger.info("System closed by user at configuration menu.")
             sys.exit(0)
         else:
-            print("Invalid input. Please enter 1, 2, or 3.")
+            print("Invalid input. Please enter 1, 2, 3, or 4.")
 
     # Default parameters shared or specific
     max_trial = 12
