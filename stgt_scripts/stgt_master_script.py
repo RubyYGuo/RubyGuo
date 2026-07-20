@@ -320,7 +320,7 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                             out = cv2.VideoWriter(str(out_path), cv2.VideoWriter_fourcc(*'mp4v'), estimated_fps, (FRAME_WIDTH, FRAME_HEIGHT))
                             recording = True
                             log_event("Output Event", "USB_Camera_Recording_On", filename)
-                            logger.info(f"Started USB recording: {filename}")
+                            logger.info(f"Started USB video recording (Face detected): {filename}")
 
                             with open(video_csv_path, "a", newline="") as f:
                                 csv.writer(f).writerow([datetime.now().isoformat(), execution_id, session_number, "USB", "started", filename])
@@ -334,7 +334,7 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
 
                     # Strict 10-second absence of FACE stops the video immediately
                     if not face_detected and (current_time - usb_last_seen > 10.0):
-                        logger.info(f"Stopping USB recording: {filename}")
+                        logger.info(f"Stopping USB video recording (No face detected for 10s): {filename}")
                         if out: out.release()
                         recording = False
                         out = None
@@ -360,7 +360,7 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                             face_absence_start = current_time
                         elif current_time - face_absence_start >= 30.0:
                             terminate_session = True
-                            termination_reason = "30s_No_Face_Detected"
+                            termination_reason = "30s_No_Face_Verified"
                     else:
                         face_absence_start = 0.0
 
@@ -370,12 +370,12 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                             session_absence_start = current_time
                         elif current_time - session_absence_start >= absence_limit:
                             terminate_session = True
-                            termination_reason = f"{absence_limit}s_Total_Absence"
+                            termination_reason = f"{absence_limit}s_Total_Station_Absence"
                     else:
                         session_absence_start = 0.0
 
                     if terminate_session:
-                        logger.info(f"Terminating active session early: {termination_reason}")
+                        logger.info(f"Terminating STGT session early: {termination_reason}")
                         log_event("Condition Event", "Session_Terminated_Early", termination_reason)
                         if stgt_process:
                             stgt_process.terminate()
@@ -394,17 +394,15 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                     log_event("Condition Event", "STGT_Subprocess_Start", session_number)
                     log_event("Timer Event", "Session_Timer_Start", 0.0)
 
+                    # Removed unused arguments (phase, hab_base, hab_jitter) to prevent subprocess crash
                     cmd = [
                         "/usr/bin/python3",
                         "/home/capuchin/Desktop/stgt_scripts/stgt_task.py",
                         "--execution_id", execution_id,
                         "--session_number", str(session_number),
-                        "--phase", phase,
                         "--max_trial", str(max_trial),
                         "--lever_dur", str(lever_dur),
                         "--buffer_dur", str(buffer_dur),
-                        "--hab_base", str(hab_base),
-                        "--hab_jitter", str(hab_jitter),
                         "--data_csv_path", str(data_csv_path),
                         "--t0", str(T0)
                     ]
@@ -413,6 +411,7 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                         cmd.extend([str(i) for i in iti_list])
 
                     # Start Task Subprocess
+                    logger.info(f"Trigger condition met. Spawning STGT Subprocess (Session {session_number}).")
                     stgt_process = subprocess.Popen(cmd)
                     stgt_started = True
                     session_start_time = current_time
@@ -431,7 +430,7 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                             csi_outs[i] = proc
                             csi_filenames[i] = filename_csi
                             log_event("Output Event", f"CSI_Camera_{i}_Recording_On", filename_csi)
-                            logger.info(f"Started CSI camera {cam_index}: {filename_csi}")
+                            logger.info(f"Started CSI camera {cam_index} recording: {filename_csi}")
 
                             with open(video_csv_path, "a", newline="") as f:
                                 csv.writer(f).writerow([datetime.now().isoformat(), execution_id, session_number, f"CSI_{cam_index}", "started", filename_csi])
@@ -454,7 +453,7 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                     log_event("Diagnostic Event", "CPU_Temperature_Log", f"{current_temp} (Session End)")
                     last_temp_log_time = current_time 
 
-                    logger.info("STGT finished. Stopping CSI cameras.")
+                    logger.info("STGT subprocess concluded. Stopping CSI cameras.")
                     for i, proc in enumerate(csi_outs):
                         if proc:
                             proc.send_signal(signal.SIGINT)
@@ -472,7 +471,7 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                     if ret_code == 0:
                         # FULL COMPLETION: Start 4-Minute ISB
                         log_event("Condition Event", "STGT_Subprocess_End", "Complete")
-                        logger.info("Session complete. Starting 4-minute Inter-Session Break.")
+                        logger.info("STGT Session fully completed. Starting 4-minute Inter-Session Break.")
                         isb_active = True
                         isb_until = current_time + 240.0
                         presence_timeout_start = 0 
@@ -481,7 +480,7 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                     else:
                         # EARLY TERMINATION 
                         log_event("Condition Event", "STGT_Subprocess_End", "Early_Termination")
-                        logger.info("Monkey might have left. Skipping ISB. System primed for new arrival.")
+                        logger.info("Session concluded prematurely. Skipping ISB. System primed for new arrival.")
                         isb_active = False
                         session_subject_present = False
                         presence_timeout_start = 0
@@ -493,7 +492,7 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                 if isb_active:
                     if instant_presence:
                         if presence_timeout_start != 0:
-                            logger.info("Subject returned before timeout elapsed. Cancelling timeout.")
+                            logger.info("Subject detected during ISB departure timeout. Cancelling timeout.")
                             log_event("Condition Event", "Presence_Timeout_Cancelled", "Subject Returned")
                             presence_timeout_start = 0 
                     else:
@@ -502,13 +501,13 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                             log_event("Variable Event", "YOLO_Detection_Ratio", round(ratio, 2))
                             log_event("Condition Event", "Presence_Timeout_Begin", 30.0)
                         elif current_time - presence_timeout_start >= 30.0:
-                            logger.info("Subject departed. 30-second presence timeout elapsed.")
+                            logger.info("Subject departed. 30-second ISB presence timeout elapsed.")
                             log_event("Timer Event", "Presence_Timeout_Elapsed", 30.0)
                             log_event("Variable Event", "Subject_Present_Flag", 0)
                             log_event("Variable Event", "Face_Detection", 0)
                             log_event("Variable Event", "Station_Active", 0)
 
-                            logger.info("Aborting Inter-Session Break due to departure.")
+                            logger.info("Aborting Inter-Session Break due to complete subject departure.")
                             log_event("Condition Event", "ISB_Timer_Aborted", "Subject Departed")
                             log_event("Condition Event", "System_Ready_Next_Subject", "")
 
@@ -519,7 +518,7 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                             session_subject_present = False
 
                     if isb_active and current_time >= isb_until:
-                        logger.info("Inter-Session Break elapsed. Ready for next session.")
+                        logger.info("4-Minute Inter-Session Break elapsed. System ready for next session.")
                         log_event("Timer Event", "ISB_Timer_Elapsed", 240.0)
                         isb_active = False
 
