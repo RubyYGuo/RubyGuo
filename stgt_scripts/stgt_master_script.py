@@ -207,6 +207,7 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
     isb_until = 0.0
     presence_timeout_start = 0.0  
     session_absence_start = 0.0  
+    face_absence_start = 0.0      # Tracks strict face absence
     last_temp_log_time = time.time()
 
     # Establish conditional absence threshold
@@ -308,7 +309,7 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                 # ==========================================
                 # PROCESS A: INDEPENDENT USB RECORDING
                 # ==========================================
-                # Video is now strictly triggered by visual face detection
+                # Video is strictly triggered and maintained by visual face detection
                 if face_detected:
                     usb_last_seen = current_time
                     if not recording:
@@ -350,19 +351,37 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
 
                 # EARLY TERMINATION CHECK 
                 if stgt_started:
-                    # Session only aborts if neither face nor beam is present for 90s
+                    terminate_session = False
+                    termination_reason = ""
+
+                    # Check 1: Strict 30-second face absence limit
+                    if not face_detected:
+                        if face_absence_start == 0.0:
+                            face_absence_start = current_time
+                        elif current_time - face_absence_start >= 30.0:
+                            terminate_session = True
+                            termination_reason = "30s_No_Face_Detected"
+                    else:
+                        face_absence_start = 0.0
+
+                    # Check 2: 90-second total absence limit (no face AND no beam)
                     if not instant_presence:
                         if session_absence_start == 0.0:
                             session_absence_start = current_time
                         elif current_time - session_absence_start >= absence_limit:
-                            logger.info(f"Subject absent for {absence_limit}s during active session. Terminating early.")
-                            log_event("Condition Event", "Session_Terminated_Early", f"{absence_limit}s_Absence")
-                            if stgt_process:
-                                stgt_process.terminate()
-                                stgt_process.wait()
-                            session_absence_start = 0.0
+                            terminate_session = True
+                            termination_reason = f"{absence_limit}s_Total_Absence"
                     else:
                         session_absence_start = 0.0
+
+                    if terminate_session:
+                        logger.info(f"Terminating active session early: {termination_reason}")
+                        log_event("Condition Event", "Session_Terminated_Early", termination_reason)
+                        if stgt_process:
+                            stgt_process.terminate()
+                            stgt_process.wait()
+                        session_absence_start = 0.0
+                        face_absence_start = 0.0
 
                 # SESSION START (Modified to block execution if user aborted)
                 if instant_presence and not stgt_started and not isb_active and not disable_task_spawning:
@@ -448,6 +467,7 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                     stgt_started = False
                     csi_outs = [None] * len(csi_sources)
                     session_absence_start = 0.0
+                    face_absence_start = 0.0
 
                     if ret_code == 0:
                         # FULL COMPLETION: Start 4-Minute ISB
