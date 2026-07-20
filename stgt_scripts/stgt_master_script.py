@@ -383,17 +383,21 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                     stgt_process = subprocess.Popen(cmd)
                     stgt_started = True
                     session_start_time = current_time
+                    
+                    face_absence_start = 0.0
+                    session_absence_start = 0.0
 
                     for i, cam_index in enumerate(csi_sources):
                         timestamp_csi = datetime.now().strftime("%Y%m%d_%H%M%S")
                         filename_csi = f"{timestamp_csi}_csi_cam{i}.mp4"
                         out_path_csi = record_dir / filename_csi
                         try:
+                            time.sleep(0.5)
                             proc = subprocess.Popen([
                                 "rpicam-vid", "-t", "0", "-n", "--inline",
                                 "--width", "640", "--height", "480", "--framerate", "15",
                                 "--camera", str(cam_index), "-o", str(out_path_csi)
-                            ])
+                            ], preexec_fn=os.setsid)
                             csi_outs[i] = proc
                             csi_filenames[i] = filename_csi
                             log_event("Output Event", f"CSI_Camera_{i}_Recording_On", filename_csi)
