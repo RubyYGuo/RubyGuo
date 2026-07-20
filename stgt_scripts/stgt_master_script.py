@@ -24,8 +24,6 @@ FOODCUP_BEAM_PIN = 21
 
 # Set mode (this is safe to call alongside the subprocess)
 GPIO.setmode(GPIO.BCM)
-GPIO.setup(FOODCUP_BEAM_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-
 # =========================
 # Setup & Initialization
 # =========================
