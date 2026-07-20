@@ -53,7 +53,7 @@ while true; do
 
     echo "Hardware test complete. Launching Master Script..."
     # Run task script
-    python3 -i stgt_master_script.py --weights best.pt --img 256 --csi 0 1
+    python3 stgt_master_script.py --weights best.pt --img 256 --csi 0 1
     
     # Capture the exit code of stgt_master_script.py
     EXIT_CODE=$?
