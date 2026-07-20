@@ -89,7 +89,6 @@ try:
     GPIO.setup(relay_cue_light, GPIO.OUT)
     GPIO.setup(relay_dispenser, GPIO.OUT)
     GPIO.setup(lv_press_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-    GPIO.setup(foodcup_beam_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 
     GPIO.output(relay_lv_out, True)
     GPIO.output(relay_dispenser, True)
