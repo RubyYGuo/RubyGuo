@@ -191,8 +191,8 @@ try:
                 
                 log_event("Condition Event", "Phase_Transition", "Reward_Dispense")
                 GPIO.output(relay_dispenser, False)
-                log_event("Pulse Output Event", "Dispenser", 0.01)
-                time.sleep(0.01)
+                log_event("Pulse Output Event", "Dispenser", 0.1)
+                time.sleep(0.1)
                 GPIO.output(relay_dispenser, True)
                 logger.info("Dispensing reward (Habituation)")
                 
@@ -261,8 +261,8 @@ try:
                 log_event("Output Event", "Cue_Light_Off")
 
                 GPIO.output(relay_dispenser, False)
-                log_event("Pulse Output Event", "Dispenser", 0.01)
-                time.sleep(0.01)
+                log_event("Pulse Output Event", "Dispenser", 0.1)
+                time.sleep(0.1)
                 GPIO.output(relay_dispenser, True)
                 logger.info("Dispensing reward (Dispenser pulsed)")
 
