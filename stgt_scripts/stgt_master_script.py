@@ -51,6 +51,10 @@ record_dir = Path("/home/capuchin/stgt_data/video_recordings")
 record_dir.mkdir(exist_ok=True)
 video_csv_path = record_dir / f"sessions_{execution_id}.csv"
 
+with open(video_csv_path, "w", newline="") as f:
+    writer = csv.writer(f)
+    writer.writerow(["Event Time", "Camera Type", "Event", "Filename"])
+
 # Main Data Log CSV
 data_csv_path = stgt_data_dir / f"data_{execution_id}.csv"
 
@@ -108,6 +112,7 @@ def configure_schedule():
             print("Invalid input. Please enter 1, 2, 3, or 4.")
 
     max_trial = 12; buffer_dur = 0; hab_base = 7; hab_jitter = 2; lever_dur = 4; iti_list = []
+    enable_beam_trigger = False  # Disabled by default
 
     def generate_iti_list(start, end, step):
         vals = []
@@ -120,7 +125,7 @@ def configure_schedule():
     if phase == "task":
         iti_min, iti_max, iti_step = 12.0, 24.0, 3.0
         iti_list = generate_iti_list(iti_min, iti_max, iti_step)
-        logger.info(f"Current defaults: phase={phase}, max_trial={max_trial}, lever_dur={lever_dur}, iti_list={iti_list}, buffer={buffer_dur}")
+        logger.info(f"Current defaults: phase={phase}, max_trial={max_trial}, lever_dur={lever_dur}, iti_list={iti_list}, buffer={buffer_dur}, beam_trigger={enable_beam_trigger}")
         if input("\nModify these default settings? (y/n): ").strip().lower() == "y":
             max_trial = int(input(f"Enter max_trial [{max_trial}]: ") or max_trial)
             lever_dur = float(input(f"Enter lever_dur [{lever_dur}]: ") or lever_dur)
@@ -132,22 +137,28 @@ def configure_schedule():
                         iti_list = generate_iti_list(*parts)
                 except Exception: pass
             buffer_dur = float(input(f"Enter buffer_dur [{buffer_dur}]: ") or buffer_dur)
+            beam_input = input(f"Enable task trigger via beam break? (y/n) [n]: ").strip().lower()
+            if beam_input == 'y':
+                enable_beam_trigger = True
 
     elif phase == "habituation":
-        logger.info(f"Current defaults: phase={phase}, max_trial={max_trial}, trial_duration={hab_base}s ±{hab_jitter}s, buffer={buffer_dur}")
+        logger.info(f"Current defaults: phase={phase}, max_trial={max_trial}, trial_duration={hab_base}s ±{hab_jitter}s, buffer={buffer_dur}, beam_trigger={enable_beam_trigger}")
         if input("\nModify these default settings? (y/n): ").strip().lower() == "y":
             max_trial = int(input(f"Enter max_trial [{max_trial}]: ") or max_trial)
             hab_base = float(input(f"Enter base trial duration (s) [{hab_base}]: ") or hab_base)
             hab_jitter = float(input(f"Enter trial duration jitter (s) [{hab_jitter}]: ") or hab_jitter)
             buffer_dur = float(input(f"Enter buffer_dur [{buffer_dur}]: ") or buffer_dur)
+            beam_input = input(f"Enable task trigger via beam break? (y/n) [n]: ").strip().lower()
+            if beam_input == 'y':
+                enable_beam_trigger = True
 
-    return phase, max_trial, lever_dur, iti_list, buffer_dur, hab_base, hab_jitter
+    return phase, max_trial, lever_dur, iti_list, buffer_dur, hab_base, hab_jitter, enable_beam_trigger
 
 # =========================
 # Main run
 # =========================
 def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
-    phase, max_trial, lever_dur, iti_list, buffer_dur, hab_base, hab_jitter = configure_schedule()
+    phase, max_trial, lever_dur, iti_list, buffer_dur, hab_base, hab_jitter, enable_beam_trigger = configure_schedule()
 
     recording = False; out = None; filename = ""; usb_last_seen = 0.0
     stgt_process = None; stgt_started = False; session_number = 0; session_subject_present = False
@@ -204,8 +215,8 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                     ratio = sum(detection_window) / len(detection_window) if detection_window else 0
                     face_detected = (ratio >= 0.50)
                     
-                    # Only read the GPIO pin if the subprocess isn't actively holding it
-                    if not stgt_started:
+                    # Only read the GPIO pin if the subprocess isn't actively holding it AND the trigger is enabled
+                    if not stgt_started and enable_beam_trigger:
                         beam_broken = (GPIO.input(FOODCUP_BEAM_PIN) == GPIO.LOW)
                     else:
                         beam_broken = False
@@ -224,12 +235,16 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                             out = cv2.VideoWriter(str(record_dir / filename), cv2.VideoWriter_fourcc(*'mp4v'), estimated_fps, (FRAME_WIDTH, FRAME_HEIGHT))
                             recording = True
                             logger.info(f"Started USB video recording (Face detected): {filename}")
+                            with open(video_csv_path, "a", newline="") as f:
+                                csv.writer(f).writerow([f"{current_time - T0:.3f}", "USB_FRONT", "START", filename])
                         except Exception: pass
 
                 if recording:
                     if out: out.write(frame)
                     if not face_detected and (current_time - usb_last_seen > 10.0):
                         logger.info(f"Stopping USB video recording (No face detected for 10s): {filename}")
+                        with open(video_csv_path, "a", newline="") as f:
+                            csv.writer(f).writerow([f"{current_time - T0:.3f}", "USB_FRONT", "STOP", filename])
                         if out: out.release()
                         recording = False; out = None; filename = ""
 
@@ -275,7 +290,9 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                     face_absence_start = 0.0
 
                     for i, cam_index in enumerate(csi_sources):
-                        filename_csi = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_csi_cam{i}.mp4"
+                        cam_name = "TOP" if i == 0 else "SIDE" if i == 1 else f"CAM{i}"
+                        filename_csi = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_csi_{cam_name}.mp4"
+                        csi_filenames[i] = filename_csi
                         try:
                             time.sleep(0.5)
                             proc = subprocess.Popen([
@@ -284,19 +301,26 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                                 "--camera", str(cam_index), "-o", str(record_dir / filename_csi)
                             ], preexec_fn=os.setsid)
                             csi_outs[i] = proc
-                            logger.info(f"Started CSI camera {cam_index} recording: {filename_csi}")
+                            logger.info(f"Started CSI camera {cam_name} recording: {filename_csi}")
+                            with open(video_csv_path, "a", newline="") as f:
+                                csv.writer(f).writerow([f"{current_time - T0:.3f}", f"CSI_{cam_name}", "START", filename_csi])
                         except Exception: pass
 
                 if stgt_started and stgt_process and stgt_process.poll() is not None:
                     ret_code = stgt_process.poll()
                     logger.info("STGT subprocess concluded. Stopping CSI cameras.")
-                    for proc in csi_outs:
+                    for i, proc in enumerate(csi_outs):
                         if proc:
                             proc.send_signal(signal.SIGINT)
                             proc.wait()
+                            cam_name = "TOP" if i == 0 else "SIDE" if i == 1 else f"CAM{i}"
+                            stop_time = time.time()
+                            with open(video_csv_path, "a", newline="") as f:
+                                csv.writer(f).writerow([f"{stop_time - T0:.3f}", f"CSI_{cam_name}", "STOP", csi_filenames[i]])
 
                     stgt_started = False
                     csi_outs = [None] * len(csi_sources)
+                    csi_filenames = [None] * len(csi_sources)
                     face_absence_start = 0.0
                     
                     # *** THE RECLAIM: Take the pin back so the master script can watch for the next session ***
