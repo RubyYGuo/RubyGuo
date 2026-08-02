@@ -28,7 +28,7 @@ GPIO.setup(FOODCUP_BEAM_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 # =========================
 # Setup & Initialization
 # =========================
-execution_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+execution_id = datetime.now().strftime("%y%m%d_%H%M%S")
 T0 = time.time()  # Master Baseline Time
 
 stgt_data_dir = Path("/home/capuchin/stgt_data/task_data")
@@ -230,7 +230,7 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                 if face_detected:
                     usb_last_seen = current_time
                     if not recording:
-                        filename = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_FRONT_capuchin.mp4"
+                        filename = f"{datetime.now().strftime('%y%m%d_%H%M%S')}_FRONT_capuchin.mp4"
                         try:
                             out = cv2.VideoWriter(str(record_dir / filename), cv2.VideoWriter_fourcc(*'mp4v'), estimated_fps, (FRAME_WIDTH, FRAME_HEIGHT))
                             recording = True
@@ -291,7 +291,7 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
 
                     for i, cam_index in enumerate(csi_sources):
                         cam_name = "TOP" if i == 0 else "SIDE" if i == 1 else f"CAM{i}"
-                        filename_csi = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_csi_{cam_name}.mp4"
+                        filename_csi = f"{datetime.now().strftime('%y%m%d_%H%M%S')}_{cam_name}.mp4"
                         csi_filenames[i] = filename_csi
                         try:
                             time.sleep(0.5)
