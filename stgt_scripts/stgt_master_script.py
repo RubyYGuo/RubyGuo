@@ -233,6 +233,9 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                 # ==========================================
                 # USB FRONT CAMERA RECORDING (WITH LOGGING)
                 # ==========================================
+                # ==========================================
+                # USB FRONT CAMERA RECORDING (WITH LOGGING)
+                # ==========================================
                 if face_detected:
                     usb_last_seen = current_time
                     if not recording:
@@ -242,6 +245,8 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                             if not out.isOpened():
                                 raise RuntimeError("cv2.VideoWriter failed to open file stream.")
                             recording = True
+                            last_frame_write_time = current_time  # <-- ADDED: Baseline timestamp for frame drop tracking
+                            session_dropped_frames = 0            # <-- ADDED: Counter for dropped frames
                             logger.info(f"Started USB video recording (Face detected): {filename}")
                             with open(video_csv_path, "a", newline="") as f:
                                 csv.writer(f).writerow([f"{current_time - T0:.3f}", "USB_FRONT", "START", filename])
@@ -255,7 +260,16 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                 if recording:
                     if out:
                         try:
+                            # --- FRAME DROP DETECTION ---
+                            frame_interval = current_time - last_frame_write_time
+                            if frame_interval > 0.14:  # >140ms indicates at least 1 skipped frame at 15 FPS
+                                dropped_count = int(frame_interval / 0.0667) - 1
+                                session_dropped_frames += dropped_count
+                                logger.warning(f"Frame drop detected on USB_FRONT ({filename}): missed ~{dropped_count} frame(s) [{frame_interval*1000:.1f}ms lag]")
+                                log_event("Warning Event", "USB_FRONT_FrameDrop", f"{dropped_count}_frames_dropped_{frame_interval*1000:.0f}ms")
+                            
                             out.write(frame)
+                            last_frame_write_time = current_time  # <-- ADDED: Update timestamp after successful write
                         except Exception as e:
                             logger.error(f"Error writing frame to USB_FRONT video ({filename}): {e}")
                             log_event("Error Event", "USB_FRONT_FrameWrite", str(e))
@@ -265,7 +279,8 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                             filename = ""
 
                     if not face_detected and (current_time - usb_last_seen > 10.0):
-                        logger.info(f"Stopping USB video recording (No face detected for 10s): {filename}")
+                        logger.info(f"Stopping USB video recording (No face detected for 10s): {filename} | Total Dropped Frames: ~{session_dropped_frames}")
+                        log_event("Variable Event", "USB_FRONT_Total_Dropped_Frames", str(session_dropped_frames))
                         try:
                             with open(video_csv_path, "a", newline="") as f:
                                 csv.writer(f).writerow([f"{current_time - T0:.3f}", "USB_FRONT", "STOP", filename])
