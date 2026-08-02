@@ -71,8 +71,11 @@ with open(data_csv_path, "w", newline="") as f:
 
 def log_event(ev_name, item_name, value=""):
     sec = time.time() - T0
-    with open(data_csv_path, "a", newline="") as f:
-        csv.writer(f).writerow([f"{sec:.3f}", ev_name, item_name, value])
+    try:
+        with open(data_csv_path, "a", newline="") as f:
+            csv.writer(f).writerow([f"{sec:.3f}", ev_name, item_name, value])
+    except Exception as e:
+        logger.error(f"Failed to write to data CSV ({ev_name} / {item_name}): {e}")
 
 def get_cpu_temp():
     try:
@@ -135,7 +138,8 @@ def configure_schedule():
                     parts = [float(x.strip()) for x in iti_input.split(',')]
                     if len(parts) == 3:
                         iti_list = generate_iti_list(*parts)
-                except Exception: pass
+                except Exception as e:
+                    logger.error(f"Failed to parse custom ITI input: {e}")
             buffer_dur = float(input(f"Enter buffer_dur [{buffer_dur}]: ") or buffer_dur)
             beam_input = input(f"Enable task trigger via beam break? (y/n) [n]: ").strip().lower()
             if beam_input == 'y':
@@ -226,26 +230,49 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                 if instant_presence and not session_subject_present:
                     session_subject_present = True
 
-                # USB Recording
+                # ==========================================
+                # USB FRONT CAMERA RECORDING (WITH LOGGING)
+                # ==========================================
                 if face_detected:
                     usb_last_seen = current_time
                     if not recording:
                         filename = f"{datetime.now().strftime('%y%m%d_%H%M%S')}_FRONT_capuchin.mp4"
                         try:
                             out = cv2.VideoWriter(str(record_dir / filename), cv2.VideoWriter_fourcc(*'mp4v'), estimated_fps, (FRAME_WIDTH, FRAME_HEIGHT))
+                            if not out.isOpened():
+                                raise RuntimeError("cv2.VideoWriter failed to open file stream.")
                             recording = True
                             logger.info(f"Started USB video recording (Face detected): {filename}")
                             with open(video_csv_path, "a", newline="") as f:
                                 csv.writer(f).writerow([f"{current_time - T0:.3f}", "USB_FRONT", "START", filename])
-                        except Exception: pass
+                        except Exception as e:
+                            logger.error(f"Failed to start USB_FRONT video recording ({filename}): {e}")
+                            log_event("Error Event", "USB_FRONT_VideoWriter", str(e))
+                            recording = False
+                            out = None
+                            filename = ""
 
                 if recording:
-                    if out: out.write(frame)
+                    if out:
+                        try:
+                            out.write(frame)
+                        except Exception as e:
+                            logger.error(f"Error writing frame to USB_FRONT video ({filename}): {e}")
+                            log_event("Error Event", "USB_FRONT_FrameWrite", str(e))
+                            out.release()
+                            recording = False
+                            out = None
+                            filename = ""
+
                     if not face_detected and (current_time - usb_last_seen > 10.0):
                         logger.info(f"Stopping USB video recording (No face detected for 10s): {filename}")
-                        with open(video_csv_path, "a", newline="") as f:
-                            csv.writer(f).writerow([f"{current_time - T0:.3f}", "USB_FRONT", "STOP", filename])
-                        if out: out.release()
+                        try:
+                            with open(video_csv_path, "a", newline="") as f:
+                                csv.writer(f).writerow([f"{current_time - T0:.3f}", "USB_FRONT", "STOP", filename])
+                        except Exception as e:
+                            logger.error(f"Failed to write USB_FRONT STOP to video CSV: {e}")
+                        if out:
+                            out.release()
                         recording = False; out = None; filename = ""
 
                 # ==========================================
@@ -289,6 +316,9 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                     session_start_time = current_time
                     face_absence_start = 0.0
 
+                    # ==========================================
+                    # CSI CAMERAS SPAWNING (WITH LOGGING)
+                    # ==========================================
                     for i, cam_index in enumerate(csi_sources):
                         cam_name = "TOP" if i == 0 else "SIDE" if i == 1 else f"CAM{i}"
                         filename_csi = f"{datetime.now().strftime('%y%m%d_%H%M%S')}_{cam_name}.mp4"
@@ -304,19 +334,27 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                             logger.info(f"Started CSI camera {cam_name} recording: {filename_csi}")
                             with open(video_csv_path, "a", newline="") as f:
                                 csv.writer(f).writerow([f"{current_time - T0:.3f}", f"CSI_{cam_name}", "START", filename_csi])
-                        except Exception: pass
+                        except Exception as e:
+                            logger.error(f"Failed to start CSI camera {cam_name} ({filename_csi}): {e}")
+                            log_event("Error Event", f"CSI_{cam_name}_Start", str(e))
+                            csi_outs[i] = None
 
                 if stgt_started and stgt_process and stgt_process.poll() is not None:
                     ret_code = stgt_process.poll()
                     logger.info("STGT subprocess concluded. Stopping CSI cameras.")
                     for i, proc in enumerate(csi_outs):
                         if proc:
-                            proc.send_signal(signal.SIGINT)
-                            proc.wait()
-                            cam_name = "TOP" if i == 0 else "SIDE" if i == 1 else f"CAM{i}"
-                            stop_time = time.time()
-                            with open(video_csv_path, "a", newline="") as f:
-                                csv.writer(f).writerow([f"{stop_time - T0:.3f}", f"CSI_{cam_name}", "STOP", csi_filenames[i]])
+                            try:
+                                proc.send_signal(signal.SIGINT)
+                                proc.wait()
+                                cam_name = "TOP" if i == 0 else "SIDE" if i == 1 else f"CAM{i}"
+                                stop_time = time.time()
+                                with open(video_csv_path, "a", newline="") as f:
+                                    csv.writer(f).writerow([f"{stop_time - T0:.3f}", f"CSI_{cam_name}", "STOP", csi_filenames[i]])
+                            except Exception as e:
+                                cam_name = "TOP" if i == 0 else "SIDE" if i == 1 else f"CAM{i}"
+                                logger.error(f"Error stopping CSI camera {cam_name}: {e}")
+                                log_event("Error Event", f"CSI_{cam_name}_Stop", str(e))
 
                     stgt_started = False
                     csi_outs = [None] * len(csi_sources)
@@ -365,13 +403,20 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
     except KeyboardInterrupt:
         logger.info("Interrupted by user. Shutting down entirely.")
     finally:
-        if out: out.release()
+        if out:
+            out.release()
         cap.release()
-        try: GPIO.cleanup(FOODCUP_BEAM_PIN)
-        except Exception: pass
+        try:
+            GPIO.cleanup(FOODCUP_BEAM_PIN)
+        except Exception:
+            pass
         for proc in csi_outs:
             if proc:
-                proc.send_signal(signal.SIGINT); proc.wait()
+                try:
+                    proc.send_signal(signal.SIGINT)
+                    proc.wait()
+                except Exception as e:
+                    logger.error(f"Error during final cleanup of CSI process: {e}")
         if stgt_process:
             stgt_process.terminate(); stgt_process.wait()
 
