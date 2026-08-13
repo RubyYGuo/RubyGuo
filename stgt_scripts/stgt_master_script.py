@@ -410,10 +410,11 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
             except KeyboardInterrupt:
                 print("\n")
                 if input("Do you wish to keep the webcam face detection and recording process running? (y/n): ").strip().lower() == 'y':
+                    logger.info("Keeping webcam face detection and recording process active. Task spawning disabled.")
                     disable_task_spawning = True
                     if stgt_process: stgt_process.terminate()
                     continue
-                else: raise  
+                else: raise
 
     except KeyboardInterrupt:
         logger.info("Interrupted by user. Shutting down entirely.")
