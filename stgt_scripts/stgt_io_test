@@ -14,8 +14,8 @@ from datetime import datetime
 relay_lv_out = 19
 lv_press_pin = 13
 relay_cue_light = 12
-relay_mgz = 22
-mgz_beam_pin = 21
+relay_dsp = 22
+fc_beam_pin = 21
 
 # =========================
 # HELPER FUNCTIONS
@@ -77,7 +77,7 @@ def test_lever():
 
 
 def test_cue_light():
-    cue_dur = get_duration("\nEnter duration to turn on the cue light (seconds): ", 1.0)
+    cue_dur = get_duration("\nEnter duration to turn on the cue light (seconds): ", 2.0)
         
     print(f"{datetime.now().isoformat()} Turning on cue light for {cue_dur} seconds...")
     GPIO.output(relay_cue_light, False)
@@ -86,21 +86,21 @@ def test_cue_light():
     print(f"{datetime.now().isoformat()} Cue light turned off.")
 
 
-def test_magazine():
-    dispense_count = get_integer("\nEnter number of times to test the magazine relay: ", 3)
-    print(f"\n{datetime.now().isoformat()} Starting magazine relay test. You will need to press Enter {dispense_count} times.")
+def test_dispenser():
+    dispense_count = get_integer("\nEnter number of times to test the dispenser relay: ", 2)
+    print(f"\n{datetime.now().isoformat()} Starting dispenser relay test. You will need to press Enter {dispense_count} times.")
     for i in range(dispense_count):
-        input(f"Test {i + 1}/{dispense_count}: Press Enter to turn on relay_mgz for 0.01s...")
-        GPIO.output(relay_mgz, False)
+        input(f"Test {i + 1}/{dispense_count}: Press Enter to turn on relay_dsp for 0.01s...")
+        GPIO.output(relay_dsp, False)
         time.sleep(0.01)
-        GPIO.output(relay_mgz, True)
+        GPIO.output(relay_dsp, True)
         print(f"{datetime.now().isoformat()} Relay activated.")
 
 
-def test_beam():
-    beam_dur = get_duration("\nEnter duration to test the beam break (seconds): ", 5.0)
+def test_fcbeam():
+    beam_dur = get_duration("\nEnter duration to test the food cup beam break (seconds): ", 5.0)
         
-    print(f"{datetime.now().isoformat()} Testing beam break for {beam_dur} seconds. Please trigger the beam...")
+    print(f"{datetime.now().isoformat()} Testing beam break for {beam_dur} seconds. Please reach into the food cup...")
     
     beam_break_count = 0
     def beam_callback(channel):
@@ -108,9 +108,9 @@ def test_beam():
         beam_break_count += 1
         print(f"{datetime.now().isoformat()} Beam break detected. Total: {beam_break_count}")
 
-    GPIO.add_event_detect(mgz_beam_pin, GPIO.FALLING, callback=beam_callback, bouncetime=200)
+    GPIO.add_event_detect(fc_beam_pin, GPIO.FALLING, callback=beam_callback, bouncetime=200)
     time.sleep(beam_dur)
-    GPIO.remove_event_detect(mgz_beam_pin)
+    GPIO.remove_event_detect(fc_beam_pin)
     print(f"{datetime.now().isoformat()} Beam break test completed.")
 
 
@@ -200,8 +200,8 @@ def test_csi_cameras():
 def test_all():
     test_lever()
     test_cue_light()
-    test_magazine()
-    test_beam()
+    test_dispenser()
+    test_fcbeam()
     test_usb_camera()
     input("\nPress Enter to test BOTH CSI cameras side-by-side...")
     test_csi_cameras()
@@ -217,14 +217,14 @@ if __name__ == "__main__":
     try:
         # Setup pins
         GPIO.setup(relay_lv_out, GPIO.OUT)
-        GPIO.setup(relay_mgz, GPIO.OUT)
+        GPIO.setup(relay_dsp, GPIO.OUT)
         GPIO.setup(relay_cue_light, GPIO.OUT)
         GPIO.setup(lv_press_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-        GPIO.setup(mgz_beam_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+        GPIO.setup(fc_beam_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 
         # Initial relay state (True = OFF/Retracted)
         GPIO.output(relay_lv_out, True)
-        GPIO.output(relay_mgz, True)
+        GPIO.output(relay_dsp, True)
         GPIO.output(relay_cue_light, True)
 
         print(f"\n{datetime.now().isoformat()} ========== HARDWARE TESTING PHASE ==========")
@@ -233,8 +233,8 @@ if __name__ == "__main__":
             print("\n--- STGT Hardware Test Menu ---")
             print("1. Test Lever Extension & Press")
             print("2. Test Cue Light")
-            print("3. Test Magazine Relay")
-            print("4. Test Magazine Beam Break")
+            print("3. Test Dispenser Relay")
+            print("4. Test Food Cup Beam Break")
             print("5. Test USB Camera")
             print("6. Test CSI Cameras (Side-by-side)")
             print("7. Test ALL Components Sequentially")
@@ -247,9 +247,9 @@ if __name__ == "__main__":
             elif choice == '2':
                 test_cue_light()
             elif choice == '3':
-                test_magazine()
+                test_dispenser()
             elif choice == '4':
-                test_beam()
+                test_fcbeam()
             elif choice == '5':
                 test_usb_camera()
             elif choice == '6':
