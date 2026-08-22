@@ -56,7 +56,7 @@ with open(video_csv_path, "w", newline="") as f:
     writer.writerow(["Event Time", "Camera Type", "Event", "Filename"])
 
 # Main Data Log CSV Path
-data_csv_path = stgt_data_dir / f"data_{execution_id}.csv"
+data_csv_path = stgt_data_dir / f"sessiondata_{execution_id}.csv"
 
 def log_event(ev_name, item_name, value=""):
     sec = time.time() - T0
