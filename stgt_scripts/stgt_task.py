@@ -17,13 +17,13 @@ import signal
 parser = argparse.ArgumentParser()
 parser.add_argument("--execution_id", type=str)
 parser.add_argument("--session_number", type=int, default=1)
-parser.add_argument("--phase", type=str, default="task", choices=["task", "habituation"])
+parser.add_argument("--phase", type=str, default="task", choices=["task", "pretrain"])
 parser.add_argument("--max_trial", type=int, default=12)
 parser.add_argument("--lever_dur", type=float, default=4.0)
 parser.add_argument("--iti_list", type=float, nargs='*', default=[])
 parser.add_argument("--buffer_dur", type=float, default=5.0)
-parser.add_argument("--hab_base", type=float, default=5.0)
-parser.add_argument("--hab_jitter", type=float, default=1.0)
+parser.add_argument("--pretrain_base", type=float, default=5.0)
+parser.add_argument("--pretrain_jitter", type=float, default=1.0)
 parser.add_argument("--data_csv_path", type=str, required=True)
 parser.add_argument("--t0", type=float, required=True)
 args = parser.parse_args()
@@ -35,8 +35,8 @@ max_trial = args.max_trial
 lever_dur = args.lever_dur
 iti_list = args.iti_list
 buffer_dur = args.buffer_dur
-hab_base = args.hab_base
-hab_jitter = args.hab_jitter
+pretrain_base = args.pretrain_base
+pretrain_jitter = args.pretrain_jitter
 data_csv_path = args.data_csv_path
 t0 = args.t0
 
@@ -109,7 +109,7 @@ session_foodcup_cs_entries = 0
 session_foodcup_iti_entries = 0
 
 last_interaction_time = time.time()
-inactivity_limit = 30.0 if phase_arg == "habituation" else 90.0
+inactivity_limit = 30.0 if phase_arg == "pretrain" else 90.0
 last_foodcup_state = GPIO.HIGH
 
 def poll_foodcup():
@@ -128,7 +128,7 @@ def poll_foodcup():
                 session_foodcup_cs_entries += 1
                 log_event("Variable Event", "Session_Foodcup_CS_Entries", session_foodcup_cs_entries)
                 logger.info(f"Foodcup entry completed (CS Phase). Total: {session_foodcup_cs_entries}")
-            elif phase in ["iti", "habituation", "buffer"]:
+            elif phase in ["iti", "pretrain", "buffer"]:
                 session_foodcup_iti_entries += 1
                 log_event("Variable Event", "Session_Foodcup_ITI_Entries", session_foodcup_iti_entries)
                 logger.info(f"Foodcup entry completed ({phase} Phase). Total: {session_foodcup_iti_entries}")
@@ -185,26 +185,26 @@ try:
             log_event("Condition Event", "Phase_Transition", "Trial_Start")
             log_event("Variable Event", "Trial_Counter", trial_n + 1)
             
-            if phase_arg == "habituation":
-                phase = "habituation"
-                log_event("Variable Event", "Task_Phase_State", "habituation")
+            if phase_arg == "pretrain":
+                phase = "pretrain"
+                log_event("Variable Event", "Task_Phase_State", "pretrain")
                 
                 log_event("Condition Event", "Phase_Transition", "Reward_Dispense")
                 GPIO.output(relay_dispenser, False)
                 log_event("Pulse Output Event", "Dispenser", 0.1)
                 time.sleep(0.1)
                 GPIO.output(relay_dispenser, True)
-                logger.info("Dispensing reward (Habituation)")
+                logger.info("Dispensing reward (Pre-training)")
                 
-                trial_interval = random.uniform(hab_base - hab_jitter, hab_base + hab_jitter)
-                log_event("Variable Event", "Habituation_Interval", round(trial_interval, 3))
-                logger.info(f"Habituation interval started. Scheduled duration: {trial_interval:.2f}s")
+                trial_interval = random.uniform(pretrain_base - pretrain_jitter, pretrain_base + pretrain_jitter)
+                log_event("Variable Event", "Pretrain_Interval", round(trial_interval, 3))
+                logger.info(f"Pre-training interval started. Scheduled duration: {trial_interval:.2f}s")
                 
                 if wait_with_inactivity_check(trial_interval):
                     early_exit = True
                     break
                     
-                log_event("Timer Event", "Habituation_Timer", round(trial_interval, 3))
+                log_event("Timer Event", "Pretrain_Timer", round(trial_interval, 3))
                 
             elif phase_arg == "task":
                 if not iti_list:
