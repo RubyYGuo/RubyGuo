@@ -49,14 +49,14 @@ logger = logging.getLogger(__name__)
 # Video tracking CSV
 record_dir = Path("/home/capuchin/stgt_data/video_recordings")
 record_dir.mkdir(exist_ok=True)
-video_csv_path = record_dir / f"video_log_{execution_id}.csv"
+video_csv_path = record_dir / f"sessions_{execution_id}.csv"
 
 with open(video_csv_path, "w", newline="") as f:
     writer = csv.writer(f)
     writer.writerow(["Event Time", "Camera Type", "Event", "Filename"])
 
-# Main Data Log CSV Path
-data_csv_path = stgt_data_dir / f"sessiondata_{execution_id}.csv"
+# Main Data Log CSV Path (Default placeholder, updated dynamically in run())
+data_csv_path = stgt_data_dir / f"data_{execution_id}.csv"
 
 def log_event(ev_name, item_name, value=""):
     sec = time.time() - T0
@@ -94,7 +94,7 @@ def configure_schedule():
         if choice == '1':
             phase = "task"; break
         elif choice == '2':
-            phase = "pre-training"; break
+            phase = "pretrain"; break
         elif choice == '3':
             phase = "habituation"; break
         elif choice == '4':
@@ -106,7 +106,7 @@ def configure_schedule():
         else:
             print("Invalid input. Please enter 1-5.")
 
-    max_trial = 12; buffer_dur = 0; hab_base = 7; hab_jitter = 2; lever_dur = 4; iti_list = []
+    max_trial = 12; buffer_dur = 0; pretrain_base = 7; pretrain_jitter = 2; lever_dur = 4; iti_list = []
     enable_beam_trigger = False  # Disabled by default
 
     def generate_iti_list(start, end, step):
@@ -137,12 +137,12 @@ def configure_schedule():
             if beam_input == 'y':
                 enable_beam_trigger = True
 
-    elif phase == "pre-training":
-        logger.info(f"Current defaults: phase={phase}, max_trial={max_trial}, trial_duration={hab_base}s ±{hab_jitter}s, buffer={buffer_dur}, beam_trigger={enable_beam_trigger}")
+    elif phase == "pretrain":
+        logger.info(f"Current defaults: phase={phase}, max_trial={max_trial}, trial_duration={pretrain_base}s ±{pretrain_jitter}s, buffer={buffer_dur}, beam_trigger={enable_beam_trigger}")
         if input("\nModify these default settings? (y/n): ").strip().lower() == "y":
             max_trial = int(input(f"Enter max_trial [{max_trial}]: ") or max_trial)
-            hab_base = float(input(f"Enter base trial duration (s) [{hab_base}]: ") or hab_base)
-            hab_jitter = float(input(f"Enter trial duration jitter (s) [{hab_jitter}]: ") or hab_jitter)
+            pretrain_base = float(input(f"Enter base trial duration (s) [{pretrain_base}]: ") or pretrain_base)
+            pretrain_jitter = float(input(f"Enter trial duration jitter (s) [{pretrain_jitter}]: ") or pretrain_jitter)
             buffer_dur = float(input(f"Enter buffer_dur [{buffer_dur}]: ") or buffer_dur)
             beam_input = input(f"Enable task trigger via beam break? (y/n) [n]: ").strip().lower()
             if beam_input == 'y':
@@ -151,13 +151,18 @@ def configure_schedule():
     elif phase == "habituation":
         logger.info("Habituation selected. Subprocess task spawning is disabled. FRONT camera will record autonomously upon face detection.")
 
-    return phase, max_trial, lever_dur, iti_list, buffer_dur, hab_base, hab_jitter, enable_beam_trigger
+    return phase, max_trial, lever_dur, iti_list, buffer_dur, pretrain_base, pretrain_jitter, enable_beam_trigger
 
 # =========================
 # Main run
 # =========================
 def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
-    phase, max_trial, lever_dur, iti_list, buffer_dur, hab_base, hab_jitter, enable_beam_trigger = configure_schedule()
+    global data_csv_path  # Declare global so we can update it before file creation
+    
+    phase, max_trial, lever_dur, iti_list, buffer_dur, pretrain_base, pretrain_jitter, enable_beam_trigger = configure_schedule()
+
+    # Dynamically update the CSV name based on the chosen phase
+    data_csv_path = stgt_data_dir / f"{phase}_{execution_id}.csv"
 
     # Create the Main Data Log CSV with the selected phase recorded at T0
     with open(data_csv_path, "w", newline="") as f:
@@ -250,8 +255,12 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                             if not out.isOpened():
                                 raise RuntimeError("cv2.VideoWriter failed to open file stream.")
                             recording = True
+                            
+                            # --- FRAME DROP INITIALIZATION ---
                             last_frame_write_time = current_time
                             session_dropped_frames = 0
+                            max_drop_duration = 0.0
+                            
                             logger.info(f"Started USB video recording (Face detected): {filename}")
                             with open(video_csv_path, "a", newline="") as f:
                                 csv.writer(f).writerow([f"{current_time - T0:.3f}", "USB_FRONT", "START", filename])
@@ -265,12 +274,13 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                 if recording:
                     if out:
                         try:
+                            # --- SILENT FRAME DROP TRACKING ---
                             frame_interval = current_time - last_frame_write_time
-                            if frame_interval > 0.14: 
+                            if frame_interval > 0.14:  # >140ms indicates at least 1 skipped frame at ~15 FPS
                                 dropped_count = int(frame_interval / 0.0667) - 1
                                 session_dropped_frames += dropped_count
-                                logger.warning(f"Frame drop detected on USB_FRONT ({filename}): missed ~{dropped_count} frame(s) [{frame_interval*1000:.1f}ms lag]")
-                                log_event("Warning Event", "USB_FRONT_FrameDrop", f"{dropped_count}_frames_dropped_{frame_interval*1000:.0f}ms")
+                                if frame_interval > max_drop_duration:
+                                    max_drop_duration = frame_interval
                                 
                             out.write(frame)
                             last_frame_write_time = current_time
@@ -283,13 +293,19 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                             filename = ""
 
                     if not face_detected and (current_time - usb_last_seen > 10.0):
-                        logger.info(f"Stopping USB video recording (No face detected for 10s): {filename} | Total Dropped Frames: ~{session_dropped_frames}")
-                        log_event("Variable Event", "USB_FRONT_Total_Dropped_Frames", str(session_dropped_frames))
+                        # --- PRINT FRAME DROP SUMMARY STAMP ---
+                        if session_dropped_frames > 0:
+                            drop_summary = f"{session_dropped_frames}_dropped_max_lag_{max_drop_duration*1000:.0f}ms"
+                            logger.warning(f"USB_FRONT ({filename}) Summary: Missed ~{session_dropped_frames} frames. Longest lag: {max_drop_duration*1000:.1f}ms")
+                            log_event("Warning Event", "USB_FRONT_FrameDrop_Summary", drop_summary)
+                            
+                        logger.info(f"Stopping USB video recording (No face detected for 10s): {filename}")
                         try:
                             with open(video_csv_path, "a", newline="") as f:
                                 csv.writer(f).writerow([f"{current_time - T0:.3f}", "USB_FRONT", "STOP", filename])
                         except Exception as e:
                             logger.error(f"Failed to write USB_FRONT STOP to video CSV: {e}")
+                        
                         if out:
                             out.release()
                         recording = False; out = None; filename = ""
@@ -323,7 +339,7 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                         "--execution_id", execution_id, "--session_number", str(session_number),
                         "--phase", phase, "--max_trial", str(max_trial),
                         "--lever_dur", str(lever_dur), "--buffer_dur", str(buffer_dur),
-                        "--hab_base", str(hab_base), "--hab_jitter", str(hab_jitter),
+                        "--pretrain_base", str(pretrain_base), "--pretrain_jitter", str(pretrain_jitter),
                         "--data_csv_path", str(data_csv_path), "--t0", str(T0)
                     ]
                     if iti_list:
