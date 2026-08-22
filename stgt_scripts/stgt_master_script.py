@@ -49,7 +49,7 @@ logger = logging.getLogger(__name__)
 # Video tracking CSV
 record_dir = Path("/home/capuchin/stgt_data/video_recordings")
 record_dir.mkdir(exist_ok=True)
-video_csv_path = record_dir / f"sessions_{execution_id}.csv"
+video_csv_path = record_dir / f"video_log_{execution_id}.csv"
 
 with open(video_csv_path, "w", newline="") as f:
     writer = csv.writer(f)
