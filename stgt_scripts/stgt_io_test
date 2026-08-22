@@ -262,7 +262,7 @@ if __name__ == "__main__":
             else:
                 print("Invalid choice. Please enter a number from 1 to 8.")
 
-        print(f"\n{datetime.now().isoformat()} ========== TESTING PHASE COMPLETE ==========")
+        print(f"\n{datetime.now().isoformat()} ========== TESTING PHASE COMPLETE, PLEASE WAIT... ==========")
 
     except KeyboardInterrupt:
         print(f"\n{datetime.now().isoformat()} Testing phase interrupted by user.")
