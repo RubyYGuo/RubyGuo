@@ -365,7 +365,7 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                                 "rpicam-vid", "-t", "0", "-n", "--inline",
                                 "--width", "640", "--height", "480", "--framerate", "15",
                                 "--camera", str(cam_index), "-o", str(record_dir / filename_csi)
-                            ], preexec_fn=os.setsid)
+                            ], preexec_fn=os.setsid, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                             csi_outs[i] = proc
                             logger.info(f"Started CSI camera {cam_name} recording: {filename_csi}")
                             with open(video_csv_path, "a", newline="") as f:
