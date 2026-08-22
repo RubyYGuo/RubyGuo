@@ -55,19 +55,8 @@ with open(video_csv_path, "w", newline="") as f:
     writer = csv.writer(f)
     writer.writerow(["Event Time", "Camera Type", "Event", "Filename"])
 
-# Main Data Log CSV
+# Main Data Log CSV Path
 data_csv_path = stgt_data_dir / f"data_{execution_id}.csv"
-
-with open(data_csv_path, "w", newline="") as f:
-    writer = csv.writer(f)
-    writer.writerow(["Event Time", "Event Name", "Item Name", "Value"])
-    writer.writerow(["0.000", "Condition Event", "Execution_Start", execution_id])
-    writer.writerow(["0.000", "Timer Event", "Execution_timer", 0.0])
-    writer.writerow(["0.000", "Condition Event", "Execution timer activated", ""])
-    writer.writerow(["0.000", "Variable Event", "Face_Detection", 0])
-    writer.writerow(["0.000", "Variable Event", "Station_Active", 0])
-    writer.writerow(["0.000", "Variable Event", "Subject_Present_Flag", 0])
-    writer.writerow(["0.000", "Variable Event", "YOLO_Detection_Ratio", "0.00"])
 
 def log_event(ev_name, item_name, value=""):
     sec = time.time() - T0
@@ -96,23 +85,26 @@ def configure_schedule():
     while True:
         print("\nSelect Operating Mode:")
         print("1) Run ST/GT Task")
-        print("2) Run Habituation")
-        print("3) Return to Hardware IO Test")
-        print("4) Exit")
-        choice = input("Enter choice (1-4): ").strip()
+        print("2) Run Pre-training")
+        print("3) Run Habituation (Camera Only)")
+        print("4) Return to Hardware IO Test")
+        print("5) Exit")
+        choice = input("Enter choice (1-5): ").strip()
 
         if choice == '1':
             phase = "task"; break
         elif choice == '2':
-            phase = "habituation"; break
+            phase = "pre-training"; break
         elif choice == '3':
+            phase = "habituation"; break
+        elif choice == '4':
             logger.info("Returning to Hardware IO Test phase...")
             os._exit(99)
-        elif choice == '4':
+        elif choice == '5':
             logger.info("System closed by user at configuration menu.")
             sys.exit(0)
         else:
-            print("Invalid input. Please enter 1, 2, 3, or 4.")
+            print("Invalid input. Please enter 1-5.")
 
     max_trial = 12; buffer_dur = 0; hab_base = 7; hab_jitter = 2; lever_dur = 4; iti_list = []
     enable_beam_trigger = False  # Disabled by default
@@ -145,7 +137,7 @@ def configure_schedule():
             if beam_input == 'y':
                 enable_beam_trigger = True
 
-    elif phase == "habituation":
+    elif phase == "pre-training":
         logger.info(f"Current defaults: phase={phase}, max_trial={max_trial}, trial_duration={hab_base}s ±{hab_jitter}s, buffer={buffer_dur}, beam_trigger={enable_beam_trigger}")
         if input("\nModify these default settings? (y/n): ").strip().lower() == "y":
             max_trial = int(input(f"Enter max_trial [{max_trial}]: ") or max_trial)
@@ -156,6 +148,9 @@ def configure_schedule():
             if beam_input == 'y':
                 enable_beam_trigger = True
 
+    elif phase == "habituation":
+        logger.info("Habituation selected. Subprocess task spawning is disabled. FRONT camera will record autonomously upon face detection.")
+
     return phase, max_trial, lever_dur, iti_list, buffer_dur, hab_base, hab_jitter, enable_beam_trigger
 
 # =========================
@@ -163,6 +158,19 @@ def configure_schedule():
 # =========================
 def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
     phase, max_trial, lever_dur, iti_list, buffer_dur, hab_base, hab_jitter, enable_beam_trigger = configure_schedule()
+
+    # Create the Main Data Log CSV with the selected phase recorded at T0
+    with open(data_csv_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["Event Time", "Event Name", "Item Name", "Value"])
+        writer.writerow(["0.000", "Condition Event", "Execution_Start", execution_id])
+        writer.writerow(["0.000", "Condition Event", "Operating_Mode", phase])
+        writer.writerow(["0.000", "Timer Event", "Execution_timer", 0.0])
+        writer.writerow(["0.000", "Condition Event", "Execution timer activated", ""])
+        writer.writerow(["0.000", "Variable Event", "Face_Detection", 0])
+        writer.writerow(["0.000", "Variable Event", "Station_Active", 0])
+        writer.writerow(["0.000", "Variable Event", "Subject_Present_Flag", 0])
+        writer.writerow(["0.000", "Variable Event", "YOLO_Detection_Ratio", "0.00"])
 
     recording = False; out = None; filename = ""; usb_last_seen = 0.0
     stgt_process = None; stgt_started = False; session_number = 0; session_subject_present = False
@@ -233,9 +241,6 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                 # ==========================================
                 # USB FRONT CAMERA RECORDING (WITH LOGGING)
                 # ==========================================
-                # ==========================================
-                # USB FRONT CAMERA RECORDING (WITH LOGGING)
-                # ==========================================
                 if face_detected:
                     usb_last_seen = current_time
                     if not recording:
@@ -245,8 +250,8 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                             if not out.isOpened():
                                 raise RuntimeError("cv2.VideoWriter failed to open file stream.")
                             recording = True
-                            last_frame_write_time = current_time  # <-- ADDED: Baseline timestamp for frame drop tracking
-                            session_dropped_frames = 0            # <-- ADDED: Counter for dropped frames
+                            last_frame_write_time = current_time
+                            session_dropped_frames = 0
                             logger.info(f"Started USB video recording (Face detected): {filename}")
                             with open(video_csv_path, "a", newline="") as f:
                                 csv.writer(f).writerow([f"{current_time - T0:.3f}", "USB_FRONT", "START", filename])
@@ -260,16 +265,15 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                 if recording:
                     if out:
                         try:
-                            # --- FRAME DROP DETECTION ---
                             frame_interval = current_time - last_frame_write_time
-                            if frame_interval > 0.14:  # >140ms indicates at least 1 skipped frame at 15 FPS
+                            if frame_interval > 0.14: 
                                 dropped_count = int(frame_interval / 0.0667) - 1
                                 session_dropped_frames += dropped_count
                                 logger.warning(f"Frame drop detected on USB_FRONT ({filename}): missed ~{dropped_count} frame(s) [{frame_interval*1000:.1f}ms lag]")
                                 log_event("Warning Event", "USB_FRONT_FrameDrop", f"{dropped_count}_frames_dropped_{frame_interval*1000:.0f}ms")
-                            
+                                
                             out.write(frame)
-                            last_frame_write_time = current_time  # <-- ADDED: Update timestamp after successful write
+                            last_frame_write_time = current_time
                         except Exception as e:
                             logger.error(f"Error writing frame to USB_FRONT video ({filename}): {e}")
                             log_event("Error Event", "USB_FRONT_FrameWrite", str(e))
@@ -307,7 +311,8 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                     else:
                         face_absence_start = 0.0
 
-                if instant_presence and not stgt_started and not isb_active and not disable_task_spawning:
+                # Note: Subprocess spawn block is bypassed if phase == "habituation"
+                if instant_presence and not stgt_started and not isb_active and not disable_task_spawning and phase != "habituation":
                     session_number += 1
                     
                     # *** THE HANDOFF: Release the pin to the OS so the subprocess can claim it ***
@@ -414,7 +419,7 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                     disable_task_spawning = True
                     if stgt_process: stgt_process.terminate()
                     continue
-                else: raise
+                else: raise  
 
     except KeyboardInterrupt:
         logger.info("Interrupted by user. Shutting down entirely.")
