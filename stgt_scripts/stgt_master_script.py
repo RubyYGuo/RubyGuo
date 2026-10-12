@@ -199,13 +199,10 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
     FRAME_WIDTH = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     FRAME_HEIGHT = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     time_deque = deque(maxlen=30)
-
-    if enable_beam_trigger:
-        if GPIO.input(FOODCUP_BEAM_PIN) == GPIO.LOW:
-            logger.warning("Beam sensor reads LOW at launch! Direct sunlight or obstruction detected. Disabling beam trigger to prevent false loops.")
-            enable_beam_trigger = False
-        else:
-            logger.info("Beam break sensor validated (HIGH). System ready.")
+            
+    loop_start_time = time.time()
+    BEAM_STARTUP_DELAY = 30.0  # 30-second delay for beam break ONLY
+    beam_checked_and_armed = False
     
     logger.info("Starting detection loop...")
 
@@ -219,6 +216,17 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
         while True:
             try:
                 current_time = time.time()
+                beam_startup_elapsed = (current_time - loop_start_time) >= BEAM_STARTUP_DELAY
+
+                # Perform baseline check & arming ONCE AT SECOND 30
+                if beam_startup_elapsed and enable_beam_trigger and not beam_checked_and_armed:
+                    beam_checked_and_armed = True
+                    if GPIO.input(FOODCUP_BEAM_PIN) == GPIO.LOW:
+                        logger.warning("Beam sensor reads LOW after 30s warmup! Direct sunlight or obstruction detected. Disabling beam trigger for this run.")
+                        enable_beam_trigger = False
+                    else:
+                        logger.info("30s warmup complete. Beam break sensor validated (HIGH). Trigger ARMED.")
+
                 ret, frame = cap.read()
                 if not ret:
                     time.sleep(0.05); continue
@@ -233,20 +241,18 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                 # ==========================================
                 # DETECTION & DYNAMIC HANDOFF LOGIC
                 # ==========================================
+                if not stgt_started and enable_beam_trigger and beam_startup_elapsed:
+                    beam_broken = (GPIO.input(FOODCUP_BEAM_PIN) == GPIO.LOW)
+                else:
+                    beam_broken = False
+                
                 if frame_counter % 6 == 0:
                     results = model(frame, imgsz=img_size, conf=conf_thres, iou=0.4, verbose=False)
                     detection_window.append(1 if len(results[0].boxes) > 0 else 0)
                     ratio = sum(detection_window) / len(detection_window) if detection_window else 0
                     face_detected = (ratio >= 0.50)
-                    
-                    # Only read the GPIO pin if the subprocess isn't actively holding it AND the trigger is enabled
-                    if not stgt_started and enable_beam_trigger:
-                        beam_broken = (GPIO.input(FOODCUP_BEAM_PIN) == GPIO.LOW)
-                    else:
-                        beam_broken = False
                         
-                    instant_presence = (face_detected or beam_broken)
-
+                instant_presence = (face_detected or beam_broken)
                 if instant_presence and not session_subject_present:
                     session_subject_present = True
 
