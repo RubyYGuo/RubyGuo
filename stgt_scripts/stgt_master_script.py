@@ -200,6 +200,13 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
     FRAME_HEIGHT = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     time_deque = deque(maxlen=30)
 
+    if enable_beam_trigger:
+        if GPIO.input(FOODCUP_BEAM_PIN) == GPIO.LOW:
+            logger.warning("Beam sensor reads LOW at launch! Direct sunlight or obstruction detected. Disabling beam trigger to prevent false loops.")
+            enable_beam_trigger = False
+        else:
+            logger.info("Beam break sensor validated (HIGH). System ready.")
+    
     logger.info("Starting detection loop...")
 
     frame_counter = 0
