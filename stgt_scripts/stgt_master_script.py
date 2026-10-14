@@ -9,6 +9,7 @@ import time
 import csv
 import sys
 import logging
+import select
 from pathlib import Path
 from datetime import datetime
 from collections import deque
@@ -157,14 +158,14 @@ def configure_schedule():
 # Main run
 # =========================
 def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
-    global data_csv_path  # Declare global so we can update it before file creation
+    global data_csv_path
     
     phase, max_trial, lever_dur, iti_list, buffer_dur, pretrain_base, pretrain_jitter, enable_beam_trigger = configure_schedule()
 
     # Dynamically update the CSV name based on the chosen phase
     data_csv_path = stgt_data_dir / f"{phase}_{execution_id}.csv"
 
-    # Create the Main Data Log CSV with the selected phase recorded at T0
+    # Create Main Data Log CSV
     with open(data_csv_path, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["Event Time", "Event Name", "Item Name", "Value"])
@@ -177,7 +178,7 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
         writer.writerow(["0.000", "Variable Event", "Subject_Present_Flag", 0])
         writer.writerow(["0.000", "Variable Event", "YOLO_Detection_Ratio", "0.00"])
 
-    recording = False; out = None; filename = ""; usb_last_seen = 0.0
+    recording = False; out = None; filename = ""; file_path = None; usb_last_seen = 0.0
     stgt_process = None; stgt_started = False; session_number = 0; session_subject_present = False
     isb_active = False; isb_until = 0.0; presence_timeout_start = 0.0  
     face_absence_start = 0.0; last_temp_log_time = time.time()
@@ -199,18 +200,22 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
     FRAME_WIDTH = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     FRAME_HEIGHT = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     time_deque = deque(maxlen=30)
-            
-    loop_start_time = time.time()
-    BEAM_STARTUP_DELAY = 30.0  # 30-second delay for beam break ONLY
-    beam_checked_and_armed = False
     
-    logger.info("Starting detection loop...")
+    loop_start_time = time.time()
+    BEAM_STARTUP_DELAY = 30.0  # 30-second warmup delay for beam break trigger
+    beam_checked_and_armed = False
+
+    logger.info("Starting detection loop... (Type 'm' + ENTER in terminal to manually activate the program)")
 
     frame_counter = 0
-    instant_presence = False
     face_detected = False
+    raw_face_present = False
     beam_broken = False
     disable_task_spawning = False
+    
+    # Manual Confirmation State Variables
+    pending_confirmation = False
+    confirmation_deadline = 0.0
 
     try:
         while True:
@@ -218,7 +223,7 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                 current_time = time.time()
                 beam_startup_elapsed = (current_time - loop_start_time) >= BEAM_STARTUP_DELAY
 
-                # Perform baseline check & arming ONCE AT SECOND 30
+                # Perform beam baseline check & arming ONCE AT SECOND 30 (if beam trigger is enabled)
                 if beam_startup_elapsed and enable_beam_trigger and not beam_checked_and_armed:
                     beam_checked_and_armed = True
                     if GPIO.input(FOODCUP_BEAM_PIN) == GPIO.LOW:
@@ -226,6 +231,40 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                         enable_beam_trigger = False
                     else:
                         logger.info("30s warmup complete. Beam break sensor validated (HIGH). Trigger ARMED.")
+
+                # ==========================================
+                # NON-BLOCKING TERMINAL CONFIRMATION PROMPT
+                # ==========================================
+                manual_trigger = False
+                if sys.stdin.isatty():
+                    try:
+                        if select.select([sys.stdin], [], [], 0)[0]:
+                            user_input = sys.stdin.readline().strip().lower()
+                            
+                            if pending_confirmation:
+                                if user_input in ['', 'y', 'yes', 'm']:
+                                    manual_trigger = True
+                                    pending_confirmation = False
+                                    logger.info("Manual override CONFIRMED by user. Program activated...")
+                                else:
+                                    logger.info(f"Manual override CANCELLED (Received '{user_input}'). Resuming normal operation.")
+                                    pending_confirmation = False
+                            else:
+                                if user_input == 'm':
+                                    pending_confirmation = True
+                                    confirmation_deadline = current_time + 5.0
+                                    logger.warning("=" * 65)
+                                    logger.warning(">>> MANUAL OVERRIDE REQUESTED ('m' received) <<<")
+                                    logger.warning(">>> Press ENTER (or type 'y' + ENTER) within 5s to CONFIRM <<<")
+                                    logger.warning("=" * 65)
+                                else:
+                                    logger.info(f"Received input '{user_input}'. Type 'm' + ENTER to request a manual session.")
+                    except Exception as e:
+                        logger.error(f"Error reading terminal input: {e}")
+
+                if pending_confirmation and current_time > confirmation_deadline:
+                    logger.info("Manual override confirmation TIMED OUT (5s elapsed). Request cancelled.")
+                    pending_confirmation = False
 
                 ret, frame = cap.read()
                 if not ret:
@@ -239,57 +278,69 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                     last_temp_log_time = current_time
 
                 # ==========================================
-                # DETECTION & DYNAMIC HANDOFF LOGIC
+                # DETECTION LOGIC (RAW vs VERIFIED & BEAM)
                 # ==========================================
                 if not stgt_started and enable_beam_trigger and beam_startup_elapsed:
                     beam_broken = (GPIO.input(FOODCUP_BEAM_PIN) == GPIO.LOW)
                 else:
                     beam_broken = False
-                
+
                 if frame_counter % 6 == 0:
                     results = model(frame, imgsz=img_size, conf=conf_thres, iou=0.4, verbose=False)
-                    detection_window.append(1 if len(results[0].boxes) > 0 else 0)
+                    raw_face_present = (len(results[0].boxes) > 0)
+                    detection_window.append(1 if raw_face_present else 0)
                     ratio = sum(detection_window) / len(detection_window) if detection_window else 0
                     face_detected = (ratio >= 0.50)
+                else:
+                    raw_face_present = (sum(detection_window) > 0)
                         
-                instant_presence = (face_detected or beam_broken)
-                if instant_presence and not session_subject_present:
+                if (face_detected or beam_broken or manual_trigger) and not session_subject_present:
                     session_subject_present = True
 
                 # ==========================================
-                # USB FRONT CAMERA RECORDING (WITH LOGGING)
+                # TENTATIVE USB RECORDING WITH AUTO-DELETE
                 # ==========================================
-                if face_detected:
-                    usb_last_seen = current_time
-                    if not recording:
-                        filename = f"{datetime.now().strftime('%y%m%d_%H%M%S')}_FRONT_capuchin.mp4"
-                        try:
-                            out = cv2.VideoWriter(str(record_dir / filename), cv2.VideoWriter_fourcc(*'mp4v'), estimated_fps, (FRAME_WIDTH, FRAME_HEIGHT))
-                            if not out.isOpened():
-                                raise RuntimeError("cv2.VideoWriter failed to open file stream.")
-                            recording = True
+                if (raw_face_present or beam_broken or manual_trigger) and not recording:
+                    filename = f"{datetime.now().strftime('%y%m%d_%H%M%S')}_FRONT_capuchin.mp4"
+                    file_path = record_dir / filename
+                    try:
+                        out = cv2.VideoWriter(str(file_path), cv2.VideoWriter_fourcc(*'mp4v'), estimated_fps, (FRAME_WIDTH, FRAME_HEIGHT))
+                        if not out.isOpened():
+                            raise RuntimeError("cv2.VideoWriter failed to open file stream.")
+                        recording = True
+                        recording_threshold_met = face_detected or beam_broken or manual_trigger
+                        usb_last_seen = current_time
+                        
+                        last_frame_write_time = current_time
+                        session_dropped_frames = 0
+                        max_drop_duration = 0.0
+                        
+                        if manual_trigger:
+                            trigger_type = "Manual Override"
+                        elif beam_broken:
+                            trigger_type = "Beam Break Sensor"
+                        else:
+                            trigger_type = "Raw Face Detection (Tentative)"
                             
-                            # --- FRAME DROP INITIALIZATION ---
-                            last_frame_write_time = current_time
-                            session_dropped_frames = 0
-                            max_drop_duration = 0.0
-                            
-                            logger.info(f"Started USB video recording (Face detected): {filename}")
-                            with open(video_csv_path, "a", newline="") as f:
-                                csv.writer(f).writerow([f"{current_time - T0:.3f}", "USB_FRONT", "START", filename])
-                        except Exception as e:
-                            logger.error(f"Failed to start USB_FRONT video recording ({filename}): {e}")
-                            log_event("Error Event", "USB_FRONT_VideoWriter", str(e))
-                            recording = False
-                            out = None
-                            filename = ""
+                        logger.info(f"Started USB video recording ({trigger_type}): {filename}")
+                        with open(video_csv_path, "a", newline="") as f:
+                            csv.writer(f).writerow([f"{current_time - T0:.3f}", "USB_FRONT", "START", filename])
+                    except Exception as e:
+                        logger.error(f"Failed to start USB_FRONT video recording ({filename}): {e}")
+                        log_event("Error Event", "USB_FRONT_VideoWriter", str(e))
+                        recording = False; out = None; filename = ""; file_path = None
 
                 if recording:
+                    if face_detected or beam_broken or manual_trigger:
+                        recording_threshold_met = True
+
+                    if raw_face_present or beam_broken or manual_trigger:
+                        usb_last_seen = current_time
+
                     if out:
                         try:
-                            # --- SILENT FRAME DROP TRACKING ---
                             frame_interval = current_time - last_frame_write_time
-                            if frame_interval > 0.14:  # >140ms indicates at least 1 skipped frame at ~15 FPS
+                            if frame_interval > 0.14:
                                 dropped_count = int(frame_interval / 0.0667) - 1
                                 session_dropped_frames += dropped_count
                                 if frame_interval > max_drop_duration:
@@ -301,34 +352,40 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                             logger.error(f"Error writing frame to USB_FRONT video ({filename}): {e}")
                             log_event("Error Event", "USB_FRONT_FrameWrite", str(e))
                             out.release()
-                            recording = False
-                            out = None
-                            filename = ""
+                            recording = False; out = None; filename = ""; file_path = None
 
-                    if not face_detected and (current_time - usb_last_seen > 10.0):
-                        # --- PRINT FRAME DROP SUMMARY STAMP ---
-                        if session_dropped_frames > 0:
-                            drop_summary = f"{session_dropped_frames}_dropped_max_lag_{max_drop_duration*1000:.0f}ms"
-                            logger.warning(f"USB_FRONT ({filename}) Summary: Missed ~{session_dropped_frames} frames. Longest lag: {max_drop_duration*1000:.1f}ms")
-                            log_event("Warning Event", "USB_FRONT_FrameDrop_Summary", drop_summary)
-                            
-                        logger.info(f"Stopping USB video recording (No face detected for 10s): {filename}")
-                        try:
-                            with open(video_csv_path, "a", newline="") as f:
-                                csv.writer(f).writerow([f"{current_time - T0:.3f}", "USB_FRONT", "STOP", filename])
-                        except Exception as e:
-                            logger.error(f"Failed to write USB_FRONT STOP to video CSV: {e}")
-                        
+                    if not raw_face_present and not beam_broken and (current_time - usb_last_seen > 10.0):
                         if out:
                             out.release()
-                        recording = False; out = None; filename = ""
+                        recording = False
+
+                        if recording_threshold_met:
+                            if session_dropped_frames > 0:
+                                drop_summary = f"{session_dropped_frames}_dropped_max_lag_{max_drop_duration*1000:.0f}ms"
+                                logger.warning(f"USB_FRONT ({filename}) Summary: Missed ~{session_dropped_frames} frames. Longest lag: {max_drop_duration*1000:.1f}ms")
+                                log_event("Warning Event", "USB_FRONT_FrameDrop_Summary", drop_summary)
+                                
+                            logger.info(f"Stopping USB video recording (Saved verified file): {filename}")
+                            try:
+                                with open(video_csv_path, "a", newline="") as f:
+                                    csv.writer(f).writerow([f"{current_time - T0:.3f}", "USB_FRONT", "STOP", filename])
+                            except Exception as e:
+                                logger.error(f"Failed to write USB_FRONT STOP to video CSV: {e}")
+                        else:
+                            try:
+                                if file_path and file_path.exists():
+                                    file_path.unlink()
+                                logger.info(f"Discarded tentative video ({filename}): 50% ratio threshold was never met.")
+                            except Exception as e:
+                                logger.error(f"Failed to delete unvalidated video file ({filename}): {e}")
+
+                        out = None; filename = ""; file_path = None
 
                 # ==========================================
                 # SESSION MANAGEMENT
                 # ==========================================
                 if stgt_started:
-                    # Strict 30-second face absence limit
-                    if not face_detected:
+                    if not face_detected and not beam_broken and not manual_trigger:
                         if face_absence_start == 0.0:
                             face_absence_start = current_time
                         elif current_time - face_absence_start >= 30.0:
@@ -340,12 +397,17 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                     else:
                         face_absence_start = 0.0
 
-                # Note: Subprocess spawn block is bypassed if phase == "habituation"
-                if instant_presence and not stgt_started and not isb_active and not disable_task_spawning and phase != "habituation":
+                should_spawn = ((face_detected or beam_broken) and not isb_active) or manual_trigger
+                
+                if should_spawn and not stgt_started and not disable_task_spawning and phase != "habituation":
                     session_number += 1
-                    
-                    # *** THE HANDOFF: Release the pin to the OS so the subprocess can claim it ***
-                    GPIO.cleanup(FOODCUP_BEAM_PIN)
+
+                    # Release beam pin before spawning subprocess if enabled
+                    if enable_beam_trigger:
+                        try:
+                            GPIO.cleanup(FOODCUP_BEAM_PIN)
+                        except Exception:
+                            pass
 
                     cmd = [
                         "/usr/bin/python3", "/home/capuchin/Desktop/stgt_scripts/stgt_task.py",
@@ -359,21 +421,29 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                         cmd.append("--iti_list")
                         cmd.extend([str(i) for i in iti_list])
 
-                    logger.info(f"Trigger condition met. Spawning STGT Subprocess (Session {session_number}).")
+                    if manual_trigger:
+                        spawn_msg = "Manual Override"
+                    elif beam_broken:
+                        spawn_msg = "Beam Break Sensor"
+                    else:
+                        spawn_msg = "YOLO Face Detection"
+
+                    logger.info(f"Trigger condition met ({spawn_msg}). Spawning STGT Subprocess (Session {session_number}).")
                     stgt_process = subprocess.Popen(cmd)
                     stgt_started = True
                     session_start_time = current_time
                     face_absence_start = 0.0
+                    if isb_active: isb_active = False
 
                     # ==========================================
-                    # CSI CAMERAS SPAWNING (WITH LOGGING)
+                    # CSI CAMERAS SPAWNING (STAGGERED)
                     # ==========================================
                     for i, cam_index in enumerate(csi_sources):
                         cam_name = "TOP" if i == 0 else "SIDE" if i == 1 else f"CAM{i}"
                         filename_csi = f"{datetime.now().strftime('%y%m%d_%H%M%S')}_{cam_name}.mp4"
                         csi_filenames[i] = filename_csi
                         try:
-                            time.sleep(0.5)
+                            time.sleep(0.5)  # Stagger delay to prevent I/O load spike
                             proc = subprocess.Popen([
                                 "rpicam-vid", "-t", "0", "-n", "--inline",
                                 "--width", "640", "--height", "480", "--framerate", "15",
@@ -388,6 +458,7 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                             log_event("Error Event", f"CSI_{cam_name}_Start", str(e))
                             csi_outs[i] = None
 
+                # SUBPROCESS MONITORING & CLEANUP
                 if stgt_started and stgt_process and stgt_process.poll() is not None:
                     ret_code = stgt_process.poll()
                     logger.info("STGT subprocess concluded. Stopping CSI cameras.")
@@ -409,9 +480,13 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                     csi_outs = [None] * len(csi_sources)
                     csi_filenames = [None] * len(csi_sources)
                     face_absence_start = 0.0
-                    
-                    # *** THE RECLAIM: Take the pin back so the master script can watch for the next session ***
-                    GPIO.setup(FOODCUP_BEAM_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+
+                    # Reclaim beam pin so master script can watch for next arrival if enabled
+                    if enable_beam_trigger:
+                        try:
+                            GPIO.setup(FOODCUP_BEAM_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+                        except Exception as e:
+                            logger.error(f"Error reclaiming GPIO pin: {e}")
 
                     if ret_code == 0:
                         logger.info("STGT Session fully completed. Starting 4-minute Inter-Session Break.")
@@ -425,7 +500,7 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                         presence_timeout_start = 0
 
                 if isb_active:
-                    if instant_presence:
+                    if face_detected or beam_broken:
                         if presence_timeout_start != 0:
                             presence_timeout_start = 0 
                     else:
