@@ -23,9 +23,6 @@ import RPi.GPIO as GPIO
 # =========================
 FOODCUP_BEAM_PIN = 21
 
-GPIO.setmode(GPIO.BCM)
-GPIO.setup(FOODCUP_BEAM_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-
 # =========================
 # Setup & Initialization
 # =========================
@@ -165,6 +162,11 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
     # Dynamically update the CSV name based on the chosen phase
     data_csv_path = stgt_data_dir / f"{phase}_{execution_id}.csv"
 
+    # Only setup GPIO in Master if beam trigger is explicitly enabled
+    if enable_beam_trigger:
+        GPIO.setmode(GPIO.BCM)
+        GPIO.setup(FOODCUP_BEAM_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+
     # Create Main Data Log CSV
     with open(data_csv_path, "w", newline="") as f:
         writer = csv.writer(f)
@@ -226,11 +228,15 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                 # Perform beam baseline check & arming ONCE AT SECOND 30 (if beam trigger is enabled)
                 if beam_startup_elapsed and enable_beam_trigger and not beam_checked_and_armed:
                     beam_checked_and_armed = True
-                    if GPIO.input(FOODCUP_BEAM_PIN) == GPIO.LOW:
-                        logger.warning("Beam sensor reads LOW after 30s warmup! Direct sunlight or obstruction detected. Disabling beam trigger for this run.")
+                    try:
+                        if GPIO.input(FOODCUP_BEAM_PIN) == GPIO.LOW:
+                            logger.warning("Beam sensor reads LOW after 30s warmup! Direct sunlight or obstruction detected. Disabling beam trigger for this run.")
+                            enable_beam_trigger = False
+                        else:
+                            logger.info("30s warmup complete. Beam break sensor validated (HIGH). Trigger ARMED.")
+                    except Exception as e:
+                        logger.error(f"Error checking beam sensor state: {e}")
                         enable_beam_trigger = False
-                    else:
-                        logger.info("30s warmup complete. Beam break sensor validated (HIGH). Trigger ARMED.")
 
                 # ==========================================
                 # NON-BLOCKING TERMINAL CONFIRMATION PROMPT
@@ -281,7 +287,10 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                 # DETECTION LOGIC (RAW vs VERIFIED & BEAM)
                 # ==========================================
                 if not stgt_started and enable_beam_trigger and beam_startup_elapsed:
-                    beam_broken = (GPIO.input(FOODCUP_BEAM_PIN) == GPIO.LOW)
+                    try:
+                        beam_broken = (GPIO.input(FOODCUP_BEAM_PIN) == GPIO.LOW)
+                    except Exception:
+                        beam_broken = False
                 else:
                     beam_broken = False
 
@@ -402,12 +411,11 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                 if should_spawn and not stgt_started and not disable_task_spawning and phase != "habituation":
                     session_number += 1
 
-                    # Release beam pin before spawning subprocess if enabled
-                    if enable_beam_trigger:
-                        try:
-                            GPIO.cleanup(FOODCUP_BEAM_PIN)
-                        except Exception:
-                            pass
+                    # Cleanup Master's GPIO setup so pins are completely free for subprocess
+                    try:
+                        GPIO.cleanup()
+                    except Exception:
+                        pass
 
                     cmd = [
                         "/usr/bin/python3", "/home/capuchin/Desktop/stgt_scripts/stgt_task.py",
@@ -484,6 +492,7 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
                     # Reclaim beam pin so master script can watch for next arrival if enabled
                     if enable_beam_trigger:
                         try:
+                            GPIO.setmode(GPIO.BCM)
                             GPIO.setup(FOODCUP_BEAM_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
                         except Exception as e:
                             logger.error(f"Error reclaiming GPIO pin: {e}")
@@ -532,7 +541,7 @@ def run(weights='best.pt', img_size=416, conf_thres=0.75, csi_sources=[]):
             out.release()
         cap.release()
         try:
-            GPIO.cleanup(FOODCUP_BEAM_PIN)
+            GPIO.cleanup()
         except Exception:
             pass
         for proc in csi_outs:
